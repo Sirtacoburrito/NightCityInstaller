@@ -13,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 function Write-Trace([string]$m) { if ($env:NCI_DEBUG -eq '1') { try { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'trace.txt') -Value ((Get-Date -Format 'HH:mm:ss.fff') + '  ' + $m) } catch {} } }
 Write-Trace 'script loaded'
 $script:AppName    = 'Night City Installer'
-$script:AppVersion = '1.4.0'
+$script:AppVersion = '1.4.1'
 $script:Root       = $PSScriptRoot
 $script:IsWin      = ($env:OS -eq 'Windows_NT')
 if ($env:LOCALAPPDATA) { $script:DataDir = Join-Path $env:LOCALAPPDATA 'NightCityInstaller' }
@@ -1392,6 +1392,14 @@ function Get-Theme {
     }
 }
 
+# Restarts the app the same way the desktop shortcut does (through the launcher .bat and
+# cmd's "start"), so the new window opens normally even when this process was started hidden.
+function Start-AppFresh {
+    $bat = Join-Path $script:Root 'Start Night City Installer.bat'
+    if (Test-Path -LiteralPath $bat) { Start-Process -FilePath $env:ComSpec -ArgumentList @('/c', '"' + $bat + '"') -WindowStyle Hidden -WorkingDirectory $script:Root }
+    else { Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', ('"' + (Join-Path $script:Root 'NightCityInstaller.ps1') + '"')) }
+}
+
 function Show-Splash($T, [string]$Logo) {
     $f = New-Object Windows.Forms.Form
     $f.FormBorderStyle = 'None'; $f.StartPosition = 'CenterScreen'; $f.Size = New-Object Drawing.Size(520, 300)
@@ -2155,7 +2163,7 @@ function Start-App {
             $ui.Log("Downloading app update $($engineRef.AppUpdate.version)...")
             $backup = Install-AppUpdate $engineRef.AppUpdate $config.githubToken
             $ui.Log("App updated. The previous version is saved in $backup. Restarting...")
-            Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', ('"' + (Join-Path $script:Root 'NightCityInstaller.ps1') + '"'))
+            Start-AppFresh
             $form.Close()
         } catch { $ui.Banner('App update failed: ' + $_.Exception.Message, @()); $ui.Log('App update failed: ' + $_.Exception.Message) }
     }
@@ -2289,9 +2297,11 @@ function Start-App {
     & $updateUpdHeader
     foreach ($n in $startupNotes) { $ui.Log($n) }
     $ui.Log("Night City Installer $($script:AppVersion). $($manifest.items.Count) mods in the list. Progress is saved in $($script:DataDir).")
+    $shownRef = @{ done = $false }
     $form.Add_Shown({
         Write-Trace 'shown'
-        $splash.form.Close()
+        $shownRef.done = $true
+        try { $splash.form.Close() } catch {}
         $split.SplitterDistance = [Math]::Max(500, $split.Width - 430)
         if (-not $config.shortcutDone) {
             try { $p = New-DesktopShortcut $script:Root; $ui.Log("Desktop shortcut created: $p") } catch {}
@@ -2316,6 +2326,18 @@ function Start-App {
             if ($grid.Rows.Count -gt 0) { $grid.Rows[0].Selected = $true; & $showDetails ([string]$grid.Rows[0].Tag) }
         }
     })
+    # Safety net: if Windows started this process hidden and the main window never appears,
+    # show it after a few seconds and drop the splash anyway.
+    $showGuard = New-Object Windows.Forms.Timer; $showGuard.Interval = 4000
+    $showGuard.Add_Tick({
+        $showGuard.Stop()
+        if (-not $shownRef.done -or -not $form.Visible) {
+            Write-Trace 'show guard: forcing the main window visible'
+            try { $splash.form.Close() } catch {}
+            $form.Visible = $true; $form.WindowState = 'Maximized'; $form.Activate()
+        }
+    })
+    $showGuard.Start()
     Write-Trace 'showing dialog'
     # Application.Run, not ShowDialog: a modal dialog would take the splash as its owner and
     # close together with it.

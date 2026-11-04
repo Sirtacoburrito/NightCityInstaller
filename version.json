@@ -1,10 +1,10 @@
 {
-  "version": "1.4.0",
-  "notes": "New Vortex-style window with sidebar, mod details with descriptions and photos, health check that fixes the empty r6\\cache\\modded crash, automatic requirements and manual installs, Play button, new icon and splash screen.",
+  "version": "1.4.1",
+  "notes": "Nexus photos now show (WebP images are converted). The app restarts through its launcher after an update, with a safety net so the window can't stay hidden. Requirements show [installed] or [MISSING].",
   "files": [
     {
       "path": "NightCityInstaller.ps1",
-      "sha256": "BA76268A5122F49425F990C64E291EBF779916561A98F9664828435713F05939"
+      "sha256": "95FCA1CC179AB08C606F2230216008FDF55D0410CF30AB5F1D230577441EA7B7"
     },
     {
       "path": "manifest.json",
