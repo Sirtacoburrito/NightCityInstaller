@@ -1,4 +1,4 @@
-NIGHT CITY INSTALLER 1.4
+NIGHT CITY INSTALLER 1.5
 Installs the "Night City Load Order" mod list for Cyberpunk 2077 patch 2.5, in order.
 
 START
@@ -6,7 +6,10 @@ START
   the app creates on first run).
 
 THE WINDOW (laid out like Vortex)
-  Left sidebar: Mods, Updates, Health check, Settings, Log, and a big Play button.
+  Left sidebar: Mods, Load Order, Updates, Health check, Settings, Log, and a big Play button.
+  The window opens straight away. Checking what's installed, the health check, update checks,
+  looking for new mods and loading mod pages and photos all run in the background; the status
+  bar shows what is still working.
   Mods: every mod in the list with a status pill, version, category and source. Click any row
   to see its description, photos from the mod page, its requirements (marked [installed] or
   [MISSING]) and the author's install notes. "All photos" and "Open mod page" open the page.
@@ -108,8 +111,12 @@ UPDATES (Updates tab)
   App:
   - The app checks the public repo github.com/Sirtacoburrito/NightCityInstaller for new versions
     (which can also bring an updated mod list). No token needed.
-  - "Update app" downloads the new files, checks each file's SHA-256 fingerprint, keeps a backup
-    of the old version in %LOCALAPPDATA%\NightCityInstaller\backup-<version>, then restarts.
+  - Updates are silent: a new version is downloaded in the background and each file's SHA-256
+    fingerprint is checked, then it is swapped in when you close the app (the old version is
+    kept in %LOCALAPPDATA%\NightCityInstaller\backup-<version>). "Restart to finish updating"
+    on the Updates page applies it right away.
+  - Mod update checks also run in the background; the Updates page and the orange rows on the
+    Mods page show what has an update. Nexus still needs your "Slow download" click per file.
   - "Check for updates when the app opens" runs both checks on start-up (on by default).
 
 OPTIONS
@@ -129,7 +136,14 @@ WHAT IT DOES AND DOESN'T TOUCH
   - Log file: %LOCALAPPDATA%\NightCityInstaller\log.txt
 
 HEALTH CHECK (sidebar)
-  Runs on start-up and before Play. It looks for:
+  Runs in the background on start-up (Play does a quick local check first). It looks for:
+  - Missing requirements, the same way Vortex's Health Check does: for every mod Vortex has
+    deployed it asks Nexus for that mod's listed requirements and reports any that aren't
+    installed ("Download" opens its page), installed but disabled in Vortex, or DLC it needs.
+    Frameworks installed by hand (CET, RED4ext, redscript, ArchiveXL, TweakXL, Codeware...) count.
+    Results are cached for 12 hours.
+  - Load order problems: a modlist.txt that is missing new archives, archives that overwrite
+    each other, and damaged archive files.
   - An empty r6\cache\modded folder. This makes the game crash on start ("Failed to load the
     original script cache"). Fix renames it to _modded_empty_<time>; nothing is deleted.
   - A replaced or missing r6\cache\final.redscripts (the game's own script cache, about 20 MB).
@@ -143,6 +157,22 @@ HEALTH CHECK (sidebar)
     the game's mod.io sign-in on this PC with the account of your token, and tells you if they
     differ or if the game hasn't downloaded anything yet. Details are written to modio-check.txt
     in the app folder (user names only, never tokens).
+
+LOAD ORDER (sidebar)
+  Cyberpunk loads archive mods (archive\pc\mod\*.archive) top to bottom, alphabetically unless
+  archive\pc\mod\modlist.txt lists them, and the FIRST archive that contains a game file wins.
+  The Load Order page lists your archive mods per mod (grouped the way Vortex installed them),
+  reads each archive's file list to show which mods really overwrite each other and who wins,
+  and lets you drag mods or use Up/Down/To top/To bottom.
+  - Auto-sort only moves mods that overlap: a patch or fix for another mod goes above it, and a
+    small, specific mod goes above a big overhaul it overlaps. Everything else keeps its place.
+  - Apply load order writes modlist.txt (like Mod Organizer 2). Vortex doesn't touch that file.
+    A modlist.txt the app didn't write is kept as modlist.txt.backup-<time>.
+  - Keep it up to date automatically: new mods you install later are placed by the same rules
+    and the file is rewritten silently.
+  - Game default renames modlist.txt (never deletes it) to go back to alphabetical order.
+  - REDmods (folders in \mods) always load after archive mods. Like Vortex, the page orders
+    them and deploys them with redMod.exe (needs the free REDmod DLC).
 
 REQUIREMENTS AND MANUAL INSTALLS
   - Before each Nexus mod, the app reads its "Requirements" section and queues any missing

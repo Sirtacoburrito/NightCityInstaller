@@ -1,10 +1,10 @@
 {
-  "version": "1.4.4",
-  "notes": "mod.io fix: the app now subscribes with the game's own mod.io sign-in (the account the CD PROJEKT RED link created), which is the only account the game downloads mods for. Your token stays as a fallback. Click Start install once after updating.",
+  "version": "1.5.0",
+  "notes": "Faster start: everything slow runs in the background. Silent app updates (installed when you close the app). Vortex-style Health Check for missing requirements. New Load Order page with conflict detection, auto-sort and modlist.txt, plus REDmod ordering like Vortex.",
   "files": [
     {
       "path": "NightCityInstaller.ps1",
-      "sha256": "8BBE53B11BC4C36E59D227F28584D3B3B83BA5235879674DE919962A9E3ED142"
+      "sha256": "82169D67E75B1E8111292463F9FF490844BAC684991D3F3CCD94AE47ED97D35C"
     },
     {
       "path": "manifest.json",
@@ -12,7 +12,7 @@
     },
     {
       "path": "README.txt",
-      "sha256": "7D3D8E283B92D0618857FD74B007AC4E42F575E81D143AD212F396D74A57A806"
+      "sha256": "22C90E5921BD91EBF51E313E0DF95CFAF9916BBB7FA907B48391A52D4249DACD"
     },
     {
       "path": "Start Night City Installer.bat",

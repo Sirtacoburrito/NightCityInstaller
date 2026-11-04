@@ -8,6 +8,9 @@ A Windows app that installs a stability-checked mod list for **Cyberpunk 2077 pa
 - **Finds new mods on start-up**: the official mod.io catalog plus well-used Nexus mods with files from after the patch, filtered for clashes.
 - **mod.io Personal Access Tokens** are supported (older OAuth 2 tokens still work).
 - **Vortex-style window**: sidebar (Mods, Updates, Health check, Settings, Log) and a Play button. Click any mod to see its description, photos from the mod page and its requirements.
+- **Fast, quiet start**: the window opens at once; installed-mod checks, update checks, discovery and mod pages load in the background. App updates download silently and install when you close the app.
+- **Load Order**: reads every archive's file list to show which mods overwrite each other, auto-sorts the ones that overlap, and writes `archive\pc\mod\modlist.txt`; REDmods are ordered and deployed with redMod.exe like Vortex.
+- **Vortex-style requirement check**: asks Nexus for each deployed mod's listed requirements and flags missing, disabled and DLC requirements.
 - **Health check**: finds known crash causes, like an empty `r6\cache\modded` folder (renamed, never deleted), script compile errors and files Vortex couldn't place.
 - **Requirements and manual installs**: missing requirements are queued before each mod; files Vortex leaves in `mod-extra-files` are copied to the standard game folders without overwriting, and every file is recorded.
 - **Updates tab**: checks every Vortex-installed Nexus mod and your mod.io subscriptions for newer versions (frameworks first), warns when the game itself is patched, and updates the app from this repo after verifying each file's SHA-256.

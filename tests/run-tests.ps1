@@ -657,5 +657,143 @@ Check 'post-install queued readme requirement next' ($EP.queue.Count -ge 2 -and 
 
 Remove-Item $tmp -Recurse -Force
 
+# ================= 1.5 tests: background jobs, silent updates, requirements, load order =================
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ("ncl-15-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory $tmp | Out-Null
+$script:DataDir = Join-Path $tmp 'data'; New-Item -ItemType Directory $script:DataDir | Out-Null
+$script:ModInfoCache = $null; $script:ReqCache = $null
+$game = Join-Path $tmp 'game'; $staging = Join-Path $tmp 'staging'
+New-Item -ItemType Directory (Join-Path $game 'archive/pc/mod') -Force | Out-Null; New-Item -ItemType Directory $staging | Out-Null
+
+# background runner: a job runs off-thread, posts to the queue, returns a result
+$script:ScriptPath = Join-Path $AppDir 'NightCityInstaller.ps1'
+$runner = New-BgRunner 2
+$j = Start-BgJob $runner 'probe' { param($a, $b) $BgUi.Log("hello $a"); $BgUi.Post('ping', 7, $null); return ($a + $b) } @(2, 3) $null
+$sw = [Diagnostics.Stopwatch]::StartNew(); $fin = @()
+while ($sw.Elapsed.TotalSeconds -lt 60 -and $fin.Count -eq 0) { Start-Sleep -Milliseconds 100; $fin = @(Receive-BgJobs $runner) }
+$evts = @(); $it = $null; while ($runner.queue.TryDequeue([ref]$it)) { $evts += , $it }
+Check 'background job returns its result' ($fin.Count -eq 1 -and $fin[0].box.result -eq 5 -and -not $fin[0].box.error) "$($fin[0].box.error)"
+Check 'background job posts UI events in order' ($evts.Count -eq 2 -and $evts[0][0] -eq 'Log' -and $evts[0][1] -eq 'hello 2' -and $evts[1][0] -eq 'Post' -and $evts[1][1] -eq 'ping' -and $evts[1][2] -eq 7)
+$j2 = Start-BgJob $runner 'boom' { throw 'bad thing' } @() $null
+$sw.Restart(); $fin = @(); while ($sw.Elapsed.TotalSeconds -lt 30 -and $fin.Count -eq 0) { Start-Sleep -Milliseconds 100; $fin = @(Receive-BgJobs $runner) }
+Check 'background job errors are captured' ($fin.Count -eq 1 -and $fin[0].box.error -eq 'bad thing')
+Check 'no jobs left running' (-not (Test-BgJobRunning $runner 'probe'))
+Stop-BgRunner $runner
+
+# silent app update: staged, verified again, swapped in, backup kept
+$appDir2 = Join-Path $tmp 'app'; New-Item -ItemType Directory $appDir2 | Out-Null
+'old' | Set-Content (Join-Path $appDir2 'NightCityInstaller.ps1')
+$stage = Join-Path $script:DataDir 'update-9.9.9'; New-Item -ItemType Directory $stage | Out-Null
+'new' | Set-Content (Join-Path $stage 'NightCityInstaller.ps1')
+$h = (Get-FileHash (Join-Path $stage 'NightCityInstaller.ps1') -Algorithm SHA256).Hash
+Write-JsonFile (Get-PendingUpdatePath) ([ordered]@{ version = '9.9.9'; notes = 'n'; stage = $stage; files = @([ordered]@{ path = 'NightCityInstaller.ps1'; sha256 = $h }) })
+$oldRoot = $script:Root; $script:Root = $appDir2
+Check 'pending update found' ((Get-PendingAppUpdate).version -eq '9.9.9')
+Check 'staged update installed' ((Install-StagedAppUpdate) -eq '9.9.9' -and (Get-Content (Join-Path $appDir2 'NightCityInstaller.ps1')) -eq 'new')
+Check 'backup kept and pending cleared' ((Test-Path (Join-Path $script:DataDir "backup-$($script:AppVersion)/NightCityInstaller.ps1")) -and -not (Test-Path (Get-PendingUpdatePath)))
+Write-JsonFile (Get-PendingUpdatePath) ([ordered]@{ version = '0.0.1'; notes = ''; stage = $stage; files = @() })
+Check 'older pending update ignored' ($null -eq (Install-StagedAppUpdate) -and -not (Test-Path (Get-PendingUpdatePath)))
+$script:Root = $oldRoot
+
+# load order: synthetic archives with known contents
+function New-TestArchive([string]$Path, [UInt64[]]$Hashes) {
+    $ms = New-Object IO.MemoryStream; $bw = New-Object IO.BinaryWriter($ms)
+    $bw.Write([UInt32]0x52414452); $bw.Write([UInt32]12); $bw.Write([UInt64]40); $bw.Write([UInt32](28 + 56 * $Hashes.Count)); $bw.Write([UInt64]0); $bw.Write([UInt32]0); $bw.Write([UInt64]0)
+    $bw.Write([UInt32]8); $bw.Write([UInt32](56 * $Hashes.Count)); $bw.Write([UInt64]0); $bw.Write([UInt32]$Hashes.Count); $bw.Write([UInt32]0); $bw.Write([UInt32]0)
+    foreach ($x in $Hashes) { $bw.Write([UInt64]$x); $bw.Write((New-Object byte[] 48)) }
+    [IO.File]::WriteAllBytes($Path, $ms.ToArray())
+}
+$md = Join-Path $game 'archive/pc/mod'
+New-TestArchive (Join-Path $md 'BigOverhaul.archive') ([UInt64[]](1..40))
+New-TestArchive (Join-Path $md 'BigOverhaul_extra.archive') ([UInt64[]](100..105))
+New-TestArchive (Join-Path $md 'aaa_SmallTweak.archive') ([UInt64[]]@(5, 6, 900))
+New-TestArchive (Join-Path $md 'ZZ BigOverhaul Patch.archive') ([UInt64[]]@(7, 8))
+New-TestArchive (Join-Path $md 'Loner.archive') ([UInt64[]]@(5000))
+[IO.File]::WriteAllBytes((Join-Path $md 'broken.archive'), [byte[]](1..10))
+Check 'archive index read' (((Read-ArchiveHashes (Join-Path $md 'aaa_SmallTweak.archive')) -join ',') -eq '5,6,900')
+Check 'non-archive rejected' ($null -eq (Read-ArchiveHashes (Join-Path $md 'broken.archive')))
+$depLo = [pscustomobject]@{ stagingPath = $staging; files = @(
+    [pscustomobject]@{ relPath = 'archive\pc\mod\BigOverhaul.archive'; source = 'Big Overhaul 1234 1.0 2026-10-25T10-00Z abc' },
+    [pscustomobject]@{ relPath = 'archive\pc\mod\BigOverhaul_extra.archive'; source = 'Big Overhaul 1234 1.0 2026-10-25T10-00Z abc' },
+    [pscustomobject]@{ relPath = 'archive\pc\mod\ZZ BigOverhaul Patch.archive'; source = 'Big Overhaul Patch 5678 1.0 2026-10-25T10-00Z def' },
+    [pscustomobject]@{ relPath = 'archive\pc\mod\aaa_SmallTweak.archive'; source = 'Small Tweak 4321 2.0 2026-10-26T10-00Z ghi' }) }
+$depLo | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $game 'vortex.deployment.json')
+$lm = Get-LoadOrderModel $game
+Check 'archives grouped per Vortex mod' ($lm.mods.Count -eq 5 -and $lm.mods['vortex:Big Overhaul 1234 1.0 2026-10-25T10-00Z abc'].archives.Count -eq 2) "$($lm.mods.Count)"
+Check 'unmanaged archives kept as their own entries' ($lm.mods.Contains('file:Loner.archive') -and $lm.unreadable -contains 'broken.archive')
+Check 'conflicts found between mods' ($lm.conflicts.Count -eq 2) (($lm.conflicts | % { "$($_.a)|$($_.b)=$($_.count)" }) -join ' ; ')
+$kBig = 'vortex:Big Overhaul 1234 1.0 2026-10-25T10-00Z abc'; $kPatch = 'vortex:Big Overhaul Patch 5678 1.0 2026-10-25T10-00Z def'; $kSmall = 'vortex:Small Tweak 4321 2.0 2026-10-26T10-00Z ghi'
+Check 'game default order is alphabetical by archive' (($lm.defaultOrder -join '|') -eq "$kBig|file:Loner.archive|$kPatch|$kSmall|file:broken.archive") ($lm.defaultOrder -join ' | ')
+$auto = @(Get-AutoLoadOrder $lm $lm.currentOrder)
+Check 'auto-sort puts patch and small tweak ahead of the overhaul' ($auto.IndexOf($kPatch) -lt $auto.IndexOf($kBig) -and $auto.IndexOf($kSmall) -lt $auto.IndexOf($kBig)) ($auto -join ' | ')
+Check 'auto-sort leaves unrelated mods where they were' ($auto.IndexOf('file:Loner.archive') -ge 0 -and $auto.Count -eq 5)
+$rep = Get-ConflictReport $lm $auto
+Check 'conflict report names winners' (@($rep | Where-Object { $_.winner -eq $kPatch -and $_.loser -eq $kBig }).Count -eq 1)
+$lines = @(Get-ModlistLines $lm $auto)
+Check 'modlist lists every archive once' ($lines.Count -eq 6 -and (@($lines | Sort-Object -Unique).Count -eq 6)) ($lines -join ',')
+'mine' | Set-Content (Join-Path $md 'modlist.txt')
+$lcfg = Get-LoadOrderConfig
+Check 'modlist written' ((Write-ArchiveLoadOrder $game $lines $lcfg) -and ((Get-Content (Join-Path $md 'modlist.txt'))[0] -eq $lines[0]))
+Check "someone else's modlist backed up" (@(Get-ChildItem $md -Filter 'modlist.txt.backup-*').Count -eq 1)
+Check 'unchanged modlist not rewritten' (-not (Write-ArchiveLoadOrder $game $lines $lcfg))
+$lcfg.order = @($auto); $lcfg.applied = $true; Save-LoadOrderConfig $lcfg
+New-TestArchive (Join-Path $md 'Another BigOverhaul fix.archive') ([UInt64[]]@(9))
+$lm2 = Get-LoadOrderModel $game
+Check 'new archive shows as unlisted' ($lm2.unlisted -contains 'Another BigOverhaul fix.archive')
+Check 'out-of-date load order is a health warning' (@(Get-LoadOrderIssues $lm2 (Get-LoadOrderConfig) | ? id -eq 'loadorder-outdated').Count -eq 1)
+$up = Update-LoadOrderAuto $lm2 (Get-LoadOrderConfig)
+$lm3 = Get-LoadOrderModel $game
+Check 'auto keep-up-to-date adds the new mod before the one it patches' ($up.changed -and $lm3.unlisted.Count -eq 0 -and ($lm3.currentOrder.IndexOf('file:Another BigOverhaul fix.archive') -lt $lm3.currentOrder.IndexOf($kBig))) ($lm3.currentOrder -join ' | ')
+Check 'conflicts reported as info' (@(Get-LoadOrderIssues $lm3 (Get-LoadOrderConfig) | ? id -eq 'archive-conflicts').Count -eq 1)
+Check 'reset renames, never deletes' ((Reset-ArchiveLoadOrder $game) -and -not (Test-Path (Join-Path $md 'modlist.txt')) -and @(Get-ChildItem $md -Filter 'modlist.txt.off-*').Count -eq 1)
+
+# Vortex-style requirement check (GraphQL modRequirements), with frameworks found on disk
+$depR = Get-Content $DeploymentJson -Raw | ConvertFrom-Json; $depR.stagingPath = $staging
+$depR.files = @($depR.files) + @([pscustomobject]@{ relPath = 'r6\scripts\x.reds'; source = 'Needy Mod 77777 1.0 2026-10-28T10-00Z zzz' })
+$depR | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $game 'vortex.deployment.json')
+New-Item -ItemType Directory (Join-Path $staging 'Disabled Thing-88888-1-0-1761600000') | Out-Null
+$script:GraphCalls = 0
+$script:NexusReqVariant = $null
+function Invoke-RestMethod {
+    param($Method = 'Get', $Uri, $Headers, $ContentType, $Body, $TimeoutSec)
+    if ([string]$Uri -like '*v2/graphql') {
+        $script:GraphCalls++
+        $b = $Body | ConvertFrom-Json
+        if (-not $Headers.apikey) { throw 'no key' }
+        if ($b.query -match 'legacyModsByDomain') { return [pscustomobject]@{ errors = @([pscustomobject]@{ message = "Field 'legacyModsByDomain' doesn't exist" }) } }
+        if ($b.query -notmatch 'modsByUid' -or $b.query -notmatch 'modRequirements') { throw 'bad graph request' }
+        $nodes = foreach ($u in @($b.variables.uids)) {
+            $id = [int]([long]$u % 4294967296)
+            if (([long]$u -shr 32) -ne 3333) { throw 'bad uid' }
+            if ($id -eq 77777) {
+                [pscustomobject]@{ modId = $id; modRequirements = [pscustomobject]@{
+                    nexusRequirements = [pscustomobject]@{ totalCount = 5; nodes = @(
+                        [pscustomobject]@{ modId = '99999'; modName = 'Missing Lib'; gameId = '3333'; externalRequirement = $false; notes = 'v2+' },
+                        [pscustomobject]@{ modId = '88888'; modName = 'Disabled Thing'; gameId = '3333'; externalRequirement = $false; notes = '' },
+                        [pscustomobject]@{ modId = '107'; modName = 'Cyber Engine Tweaks'; gameId = '3333'; externalRequirement = $false; notes = '' },
+                        [pscustomobject]@{ modId = '1'; modName = 'Other game thing'; gameId = '1704'; externalRequirement = $false; notes = '' },
+                        [pscustomobject]@{ modId = '0'; modName = 'Some website'; gameId = ''; externalRequirement = $true; notes = '' }) }
+                    dlcRequirements = @([pscustomobject]@{ gameExpansion = [pscustomobject]@{ name = 'Phantom Liberty' }; notes = '' }) } }
+            } else { [pscustomobject]@{ modId = $id; modRequirements = [pscustomobject]@{ nexusRequirements = [pscustomobject]@{ totalCount = 0; nodes = @() }; dlcRequirements = @() } } }
+        }
+        return [pscustomobject]@{ data = [pscustomobject]@{ modsByUid = [pscustomobject]@{ nodes = @($nodes) } } }
+    }
+    throw "unexpected $Uri"
+}
+$ri = @(Get-RequirementIssues $game 'K' $null)
+Check 'missing requirement reported (Vortex style)' (@($ri | ? { $_.id -eq 'req:99999' -and $_.fix -eq 'nexus-page:99999' -and $_.detail -match 'Needy Mod' }).Count -eq 1) (($ri | % id) -join ',')
+Check 'installed-but-disabled requirement reported' (@($ri | ? id -eq 'reqoff:88888').Count -eq 1)
+Check 'deployed / other-game / external requirements ignored' (@($ri | ? { $_.id -in @('req:107', 'req:1', 'req:0') }).Count -eq 0)
+Check 'DLC requirement reported when missing' (@($ri | ? id -eq 'dlc:Phantom Liberty').Count -eq 1)
+New-Item -ItemType Directory (Join-Path $game 'archive/pc/ep1') -Force | Out-Null
+$calls = $script:GraphCalls
+$ri2 = @(Get-RequirementIssues $game 'K' $null)
+Check 'requirements cached (no second round of requests)' ($script:GraphCalls -eq $calls)
+Check 'requirements fetched in batches, working query remembered' ($calls -le 6 -and $script:NexusReqVariant -eq 'modsByUid') "$calls $($script:NexusReqVariant)"
+Check 'Phantom Liberty found on disk' (@($ri2 | ? id -eq 'dlc:Phantom Liberty').Count -eq 0)
+Remove-Item function:Invoke-RestMethod
+
+Remove-Item $tmp -Recurse -Force
+
 Write-Host "TOTAL passed $pass, failed $fail"
 if ($fail -gt 0) { exit 1 }
