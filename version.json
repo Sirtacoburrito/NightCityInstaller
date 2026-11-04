@@ -1,10 +1,10 @@
 {
-  "version": "1.4.3",
-  "notes": "Health check now checks that the game's mod.io sign-in is the same account the app subscribes on, and warns when the game hasn't downloaded your mod.io mods. mod.io warnings never block Play.",
+  "version": "1.4.4",
+  "notes": "mod.io fix: the app now subscribes with the game's own mod.io sign-in (the account the CD PROJEKT RED link created), which is the only account the game downloads mods for. Your token stays as a fallback. Click Start install once after updating.",
   "files": [
     {
       "path": "NightCityInstaller.ps1",
-      "sha256": "08DD599837D77A81F6ED84FF23E7F483F0E52964ECEDEDFF6AAA59403C9FFAC5"
+      "sha256": "8BBE53B11BC4C36E59D227F28584D3B3B83BA5235879674DE919962A9E3ED142"
     },
     {
       "path": "manifest.json",
@@ -12,7 +12,7 @@
     },
     {
       "path": "README.txt",
-      "sha256": "DB4457AF9006EF2106EDDF50FB31BC86B63D4317C894C5F8A1115F61467A5C91"
+      "sha256": "7D3D8E283B92D0618857FD74B007AC4E42F575E81D143AD212F396D74A57A806"
     },
     {
       "path": "Start Night City Installer.bat",

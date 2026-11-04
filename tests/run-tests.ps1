@@ -182,7 +182,7 @@ $opened.Clear()
 $E5 = New-Engine $manifest $cfg5 @{} $ui
 Start-Engine $E5 @('nexus:17642', 'modio:Encore')
 Step-Engine $E5
-Check 'no token -> mod.io item held, not done' ($E5.state['modio:Encore'].status -eq 'Needs mod.io token' -and -not $E5.state['modio:Encore'].done)
+Check 'no token -> mod.io item held, not done' ($E5.state['modio:Encore'].status -eq 'Needs mod.io sign-in' -and -not $E5.state['modio:Encore'].done)
 Step-Engine $E5
 Check 'no token does not block Nexus; no key -> files tab' ($opened[0] -eq 'https://www.nexusmods.com/cyberpunk2077/mods/17642?tab=files')
 
@@ -576,13 +576,24 @@ $env:LOCALAPPDATA = Join-Path $tmp 'la'; $env:PUBLIC = Join-Path $tmp 'pub'
 $sess0 = Get-GameModioSession 8254
 Check 'modio: no session means not linked' (@(Get-ModioLinkIssues $sess0 'RJCalzone' 5 30 | ? id -eq 'modio-not-linked').Count -eq 1)
 $ud = Join-Path $env:LOCALAPPDATA 'mod.io/8254/50716111627241556'; New-Item -ItemType Directory $ud -Force | Out-Null
-'{"OAuth":{"Token":"secret-value","ExpiryDate":1},"Profile":{"user_id":99,"username":"OtherUser"}}' | Set-Content (Join-Path $ud 'user.json')
+'{"OAuth":{"expiry":4102444800,"status":1,"token":"secret-value"},"Profile":{"user_id":99,"username":"OtherUser"}}' | Set-Content (Join-Path $ud 'user.json')
 New-Item -ItemType Directory (Join-Path $env:PUBLIC 'mod.io/8254/metadata') -Force | Out-Null
 $sess1 = Get-GameModioSession 8254
 Check 'modio: session user read' (($sess1.users -contains 'OtherUser') -and $sess1.hasToken -and $sess1.installed -eq 0)
 $i1 = @(Get-ModioLinkIssues $sess1 'RJCalzone' 5 30)
 Check 'modio: account mismatch flagged' (@($i1 | ? id -eq 'modio-account-mismatch').Count -eq 1 -and @($i1 | ? id -eq 'modio-nothing-downloaded').Count -eq 1)
 Check 'modio: matching account not flagged' (@(Get-ModioLinkIssues $sess1 'OtherUser' 99 30 | ? id -eq 'modio-account-mismatch').Count -eq 0)
+$gl = Get-GameModioLogin 8254
+Check 'modio: game sign-in read' ($gl -and $gl.token -eq 'secret-value' -and $gl.username -eq 'OtherUser' -and -not $gl.expired)
+$cfgT = @{ modioToken = 'pat-token'; modioGameId = 8254; modioUseGame = $true }
+Update-ModioSource $cfgT
+Check 'modio: game sign-in used by default' ($cfgT.modioToken -eq 'secret-value' -and $cfgT.modioSource -eq 'game' -and $cfgT.modioPat -eq 'pat-token')
+$cfgT.modioUseGame = $false; Update-ModioSource $cfgT
+Check 'modio: token used when switched off' ($cfgT.modioToken -eq 'pat-token' -and $cfgT.modioSource -eq 'pat')
+'{"OAuth":{"Token":"old","ExpiryDate":1000},"Profile":{"username":"OtherUser"}}' | Set-Content (Join-Path $ud 'user.json')
+$cfgT.modioUseGame = $true; Update-ModioSource $cfgT
+Check 'modio: expired game sign-in falls back to token' ($cfgT.modioToken -eq 'pat-token')
+Check 'modio: mismatch offers the switch' (@(Get-ModioLinkIssues $sess1 'RJCalzone' 5 30 $true | ? fix -eq 'modio-use-game').Count -eq 1)
 $script:Root = $tmp; Write-ModioReport $sess1 'RJCalzone' 5 30 $i1
 $rep = Get-Content (Join-Path $tmp 'modio-check.txt') -Raw
 Check 'modio: report has no token value' (($rep -match 'OtherUser') -and ($rep -notmatch 'secret-value'))

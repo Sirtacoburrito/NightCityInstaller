@@ -13,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 function Write-Trace([string]$m) { if ($env:NCI_DEBUG -eq '1') { try { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'trace.txt') -Value ((Get-Date -Format 'HH:mm:ss.fff') + '  ' + $m) } catch {} } }
 Write-Trace 'script loaded'
 $script:AppName    = 'Night City Installer'
-$script:AppVersion = '1.4.3'
+$script:AppVersion = '1.4.4'
 $script:Root       = $PSScriptRoot
 $script:IsWin      = ($env:OS -eq 'Windows_NT')
 if ($env:LOCALAPPDATA) { $script:DataDir = Join-Path $env:LOCALAPPDATA 'NightCityInstaller' }
@@ -60,15 +60,59 @@ function Write-JsonFile([string]$Path, $Object) {
     Move-Item -LiteralPath $tmp -Destination $Path -Force
 }
 
+# The game keeps its own mod.io sign-in (made through the CD PROJEKT RED account link) in
+# %LOCALAPPDATA%\mod.io\<gameId>\<user>\user.json. That sign-in is a separate mod.io account from
+# one made on the mod.io website, even when both show the same name. The game only downloads mods
+# subscribed on its own account, so by default the app subscribes with that sign-in. The token is
+# read from the file each time the app starts and is never copied anywhere.
+function Get-GameModioLogin([int]$GameId) {
+    if (-not $GameId) { return $null }
+    $root = Join-Path $env:LOCALAPPDATA "mod.io\$GameId"
+    if (-not (Test-Path -LiteralPath $root)) { return $null }
+    $best = $null
+    foreach ($f in (Get-ChildItem -LiteralPath $root -Filter 'user.json' -File -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)) {
+        try {
+            $j = [IO.File]::ReadAllText($f.FullName) | ConvertFrom-Json
+            $tok = $null; $exp = 0
+            if ($j.PSObject.Properties['OAuth'] -and $j.OAuth) {
+                foreach ($k in 'token', 'Token', 'access_token') { if ($j.OAuth.PSObject.Properties[$k] -and $j.OAuth.$k) { $tok = [string]$j.OAuth.$k; break } }
+                foreach ($k in 'expiry', 'Expiry', 'ExpiryDate', 'date_expires') { if ($j.OAuth.PSObject.Properties[$k]) { try { $exp = [long]$j.OAuth.$k } catch {} ; break } }
+            }
+            if (-not $tok) { continue }
+            if ($exp -gt 100000000000) { $exp = [long]($exp / 1000) }
+            $now = [long]([datetimeoffset][datetime]::UtcNow).ToUnixTimeSeconds()
+            $pr = if ($j.PSObject.Properties['Profile']) { $j.Profile } else { $null }
+            $best = [pscustomobject]@{ token = $tok; expiry = $exp; expired = ($exp -gt 0 -and $exp -lt $now); path = $f.FullName
+                username = $(if ($pr -and $pr.PSObject.Properties['username']) { [string]$pr.username } else { '' })
+                id = $(if ($pr -and $pr.PSObject.Properties['id']) { [string]$pr.id } else { '' })
+                portal = $(if ($pr -and $pr.PSObject.Properties['display_name_portal']) { [string]$pr.display_name_portal } else { '' }) }
+            if (-not $best.expired) { return $best }
+        } catch {}
+    }
+    return $best
+}
+
+# Picks the token the app uses: the game's own mod.io sign-in when "use the game's sign-in" is on
+# and one exists, otherwise the Personal Access Token from Settings.
+function Update-ModioSource($cfg) {
+    if (-not $cfg.ContainsKey('modioPat')) { $cfg.modioPat = $cfg.modioToken }
+    $cfg.modioSource = 'pat'; $cfg.modioToken = $cfg.modioPat; $cfg.modioGameLogin = $null
+    if ($cfg.ContainsKey('modioUseGame') -and -not $cfg.modioUseGame) { return }
+    $l = $null; try { $l = Get-GameModioLogin ([int]$cfg.modioGameId) } catch {}
+    if ($l -and $l.token -and -not $l.expired) { $cfg.modioToken = $l.token; $cfg.modioSource = 'game'; $cfg.modioGameLogin = $l }
+}
+
 function Load-Config {
     $c = Read-JsonFile (Join-Path $script:DataDir 'config.json')
-    $cfg = @{ gameDir = ''; nexusKey = ''; modioToken = ''; githubToken = ''; modioGameId = 0; pauseBetweenBatches = $false; checkOnStart = $true; modioApiPath = ''; discoverOnStart = $true; autoFix = $true; shortcutDone = $false }
+    $cfg = @{ gameDir = ''; nexusKey = ''; modioToken = ''; githubToken = ''; modioGameId = 0; pauseBetweenBatches = $false; checkOnStart = $true; modioApiPath = ''; discoverOnStart = $true; autoFix = $true; shortcutDone = $false
+        modioUseGame = $true; modioPat = ''; modioSource = 'pat'; modioGameLogin = $null }
     if ($c) {
         if ($c.PSObject.Properties['pauseBetweenBatches']) { $cfg.pauseBetweenBatches = [bool]$c.pauseBetweenBatches }
         if ($c.PSObject.Properties['checkOnStart']) { $cfg.checkOnStart = [bool]$c.checkOnStart }
         if ($c.PSObject.Properties['discoverOnStart']) { $cfg.discoverOnStart = [bool]$c.discoverOnStart }
         if ($c.PSObject.Properties['autoFix']) { $cfg.autoFix = [bool]$c.autoFix }
         if ($c.PSObject.Properties['shortcutDone']) { $cfg.shortcutDone = [bool]$c.shortcutDone }
+        if ($c.PSObject.Properties['modioUseGame']) { $cfg.modioUseGame = [bool]$c.modioUseGame }
         if ($c.PSObject.Properties['modioApiPath'] -and $c.modioApiPath) { $cfg.modioApiPath = [string]$c.modioApiPath }
         if ($c.PSObject.Properties['githubToken'] -and $c.githubToken) { $cfg.githubToken = Unprotect-Text ([string]$c.githubToken) }
         if ($c.gameDir)     { $cfg.gameDir = [string]$c.gameDir }
@@ -77,13 +121,16 @@ function Load-Config {
         if ($c.modioGameId) { $cfg.modioGameId = [int]$c.modioGameId }
     }
     if (-not $cfg.gameDir -and (Test-Path -LiteralPath $script:DefaultGameDir)) { $cfg.gameDir = $script:DefaultGameDir }
+    $cfg.modioPat = $cfg.modioToken
     Set-ModioBase $cfg.modioApiPath
+    Update-ModioSource $cfg
     return $cfg
 }
 
 function Save-Config($cfg) {
     Write-JsonFile (Join-Path $script:DataDir 'config.json') ([ordered]@{
-        gameDir = $cfg.gameDir; nexusKey = (Protect-Text $cfg.nexusKey); modioToken = (Protect-Text $cfg.modioToken); modioGameId = $cfg.modioGameId
+        gameDir = $cfg.gameDir; nexusKey = (Protect-Text $cfg.nexusKey); modioToken = (Protect-Text $(if ($cfg.ContainsKey('modioPat')) { $cfg.modioPat } else { $cfg.modioToken })); modioGameId = $cfg.modioGameId
+        modioUseGame = $(if ($cfg.ContainsKey('modioUseGame')) { [bool]$cfg.modioUseGame } else { $true })
         pauseBetweenBatches = [bool]$cfg.pauseBetweenBatches; checkOnStart = [bool]$cfg.checkOnStart; githubToken = (Protect-Text $cfg.githubToken)
         modioApiPath = [string]$cfg.modioApiPath; discoverOnStart = [bool]$cfg.discoverOnStart; autoFix = [bool]$cfg.autoFix; shortcutDone = [bool]$cfg.shortcutDone })
     Set-ModioBase $cfg.modioApiPath
@@ -781,14 +828,14 @@ function Open-NexusItem($E, $item, [string]$Url, [string]$Detail) {
 function Step-Modio($E, $item) {
     $tok = $E.config.modioToken
     if (-not $tok) {
-        Set-ItemState $E $item 'Needs mod.io token' 'Add your mod.io token under Accounts, then click Start again' $false
+        Set-ItemState $E $item 'Needs mod.io sign-in' 'Start the game once and open Mods on the main menu (or add a token in Settings), then click Start again' $false
         Complete-Item $E 'skipped'
         return
     }
     if (-not $E.config.modioGameId) { $E.config.modioGameId = Resolve-ModioGameId $tok; Save-Config $E.config }
     $gid = $E.config.modioGameId
     if (-not $E.subscribed) {
-        try { $me = Invoke-Modio Get 'me' $tok; $E.ui.Log("mod.io: subscribing for account '$($me.username)'. This must be the account linked in the game's Mods menu.") } catch {}
+        try { $me = Invoke-Modio Get 'me' $tok; $E.ui.Log("mod.io: subscribing for account '$($me.username)'" + $(if ($E.config.modioSource -eq 'game') { " (the game's own mod.io sign-in)" } else { " (your token; it must be the account the game uses)" }) + '.') } catch {}
         $E.subscribed = Get-ModioSubscribed $gid $tok
     }
 
@@ -998,7 +1045,7 @@ function Get-GameModioSession([int]$GameId) {
     return $r
 }
 
-function Get-ModioLinkIssues($Session, [string]$TokenUser, [int]$TokenUserId, [int]$Subscribed) {
+function Get-ModioLinkIssues($Session, [string]$TokenUser, [int]$TokenUserId, [int]$Subscribed, [bool]$CanUseGame = $false) {
     $issues = New-Object System.Collections.ArrayList
     if (-not $Session) { return $issues }
     if ($Session.userDirs.Count -eq 0) {
@@ -1010,7 +1057,7 @@ function Get-ModioLinkIssues($Session, [string]$TokenUser, [int]$TokenUserId, [i
     $match = ($TokenUser -and ($known -contains $TokenUser)) -or ($TokenUserId -and ($known -contains "$TokenUserId"))
     if ($TokenUser -and $Session.users.Count -gt 0 -and -not $match) {
         [void]$issues.Add([pscustomobject]@{ id = 'modio-account-mismatch'; level = 'error'; title = 'The game uses a different mod.io account'
-            detail = "The game is signed in to mod.io as '$(($Session.users) -join "', '")', but the app subscribes as '$TokenUser'. The game only downloads mods subscribed on its own account. In the game: Mods > account > sign out, then link '$TokenUser'. Or sign in at mod.io as '$(@($Session.users)[0])', create a token there and paste it in Settings."; fix = '' })
+            detail = "The game is signed in to mod.io as '$(($Session.users) -join "', '")', but the app subscribes as '$TokenUser'. The game only downloads mods subscribed on its own account. Fix switches the app to the game's own mod.io sign-in, then click Start install to subscribe the mods there."; fix = $(if ($CanUseGame) { 'modio-use-game' } else { '' }) })
     }
     if ($Subscribed -gt 0 -and $Session.installed -eq 0) {
         [void]$issues.Add([pscustomobject]@{ id = 'modio-nothing-downloaded'; level = 'warning'; title = "The game hasn't downloaded any mod.io mods yet"
@@ -1022,7 +1069,9 @@ function Get-ModioLinkIssues($Session, [string]$TokenUser, [int]$TokenUserId, [i
 function Write-ModioReport($Session, [string]$TokenUser, [int]$TokenUserId, [int]$Subscribed, $Issues) {
     $l = New-Object System.Collections.ArrayList
     [void]$l.Add("Night City Installer $($script:AppVersion) - mod.io check $((Get-Date).ToString('yyyy-MM-dd HH:mm'))")
-    [void]$l.Add("App token account: '$TokenUser' (id $TokenUserId), $Subscribed Cyberpunk mods subscribed")
+    [void]$l.Add("App mod.io account: '$TokenUser' (id $TokenUserId), $Subscribed Cyberpunk mods subscribed")
+    $gl = $null; try { $gl = Get-GameModioLogin ([int]$Session.gameId) } catch {}
+    if ($gl) { [void]$l.Add("Game's own sign-in: '$($gl.username)' (id $($gl.id)), shown in game as '$($gl.portal)', expired: $($gl.expired)") }
     [void]$l.Add("Cyberpunk mod.io game id: $($Session.gameId); mod.io game folders on this PC: $($Session.otherGames -join ', ')")
     [void]$l.Add("Game session folder: $($Session.userRoot)  users: $($Session.userDirs -join ', ')")
     [void]$l.Add("Names found in the session: $($Session.users -join ', ')  ids: $($Session.ids -join ', ')  sign-in stored: $($Session.hasToken)")
@@ -1776,11 +1825,13 @@ function Start-App {
     $mkHint = { param($txt) $l = New-Object Windows.Forms.Label; $l.Text = $txt; $l.ForeColor = $T.muted; $l.AutoSize = $true; $l.MaximumSize = New-Object Drawing.Size(600, 0); $l.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 10); return $l }
     $mkBox = { param($v, [bool]$secret) $b = New-Object Windows.Forms.TextBox; $b.Width = 600; $b.Text = $v; $b.BackColor = $T.panel2; $b.ForeColor = $T.text; $b.BorderStyle = 'FixedSingle'; $b.UseSystemPasswordChar = $secret; $b.Margin = New-Object Windows.Forms.Padding(0, 9, 8, 2); return $b }
     $txtGame = & $mkBox $config.gameDir $false; $btnBrowse = New-DarkButton $T 'Browse...'
-    $k1 = & $mkBox $config.nexusKey $true; $k2 = & $mkBox $config.modioToken $true; $k4 = & $mkBox $config.modioApiPath $false; $k3 = & $mkBox $config.githubToken $true
+    $chkUseGame = New-Object Windows.Forms.CheckBox; $chkUseGame.Text = "Use the game's own mod.io sign-in"; $chkUseGame.AutoSize = $true; $chkUseGame.ForeColor = $T.text; $chkUseGame.Checked = [bool]$config.modioUseGame; $chkUseGame.Margin = New-Object Windows.Forms.Padding(0, 10, 0, 2)
+    $k1 = & $mkBox $config.nexusKey $true; $k2 = & $mkBox $config.modioPat $true; $k4 = & $mkBox $config.modioApiPath $false; $k3 = & $mkBox $config.githubToken $true
     $rows0 = @(
         @('Game folder', $txtGame, $btnBrowse, 'The folder that contains bin\x64\Cyberpunk2077.exe.'),
         @('Nexus API key', $k1, $null, 'Optional but recommended. next.nexusmods.com/settings/api-keys > Personal API Key. Needed for update checks, requirements and the newer mods.'),
-        @('mod.io token', $k2, $null, 'A Personal Access Token (or an older OAuth 2 token) with read and write access, from mod.io/me/access. Use the SAME account you linked in the game.'),
+        @('mod.io token', $k2, $null, 'Only needed when the box below is off or the game has never signed in to mod.io on this PC. A Personal Access Token from mod.io/me/access.'),
+        @('', $chkUseGame, $null, "Recommended. The game signs in to mod.io through your CD PROJEKT RED account, which is its own mod.io account (it can show your CDPR name but is not the account you use on the mod.io website). The game only downloads mods subscribed on that account, so the app uses the game's sign-in from this PC."),
         @('mod.io API path', $k4, $null, 'Leave empty unless mod.io/me/access shows a personal API path such as https://u-12345.modapi.io/v1.'),
         @('GitHub token', $k3, $null, 'Optional. App updates come from the public repo github.com/Sirtacoburrito/NightCityInstaller.')
     )
@@ -2152,13 +2203,19 @@ function Start-App {
         if (-not $config.modioToken -or -not $config.modioGameId) { return @() }
         try {
             if (((Get-Date) - $modioRef.when).TotalMinutes -gt 10) {
-                $me = Invoke-Modio Get 'me' $config.modioToken
+                try { $me = Invoke-Modio Get 'me' $config.modioToken }
+                catch {
+                    if ($config.modioSource -ne 'game' -or -not $config.modioPat) { throw }
+                    $ui.Log("mod.io refused the game's own sign-in from outside the game ($($_.Exception.Message)). Using your token from Settings instead.")
+                    $config.modioToken = $config.modioPat; $config.modioSource = 'pat'; $config.modioGameLogin = $null
+                    $me = Invoke-Modio Get 'me' $config.modioToken
+                }
                 $modioRef.user = [string]$me.username; $modioRef.uid = [int]$me.id
                 $modioRef.subs = (Get-ModioSubscribed $config.modioGameId $config.modioToken).Count
                 $modioRef.when = Get-Date
             }
             $sess = Get-GameModioSession ([int]$config.modioGameId)
-            $iss = @(Get-ModioLinkIssues $sess $modioRef.user $modioRef.uid $modioRef.subs)
+            $iss = @(Get-ModioLinkIssues $sess $modioRef.user $modioRef.uid $modioRef.subs ([bool](Get-GameModioLogin ([int]$config.modioGameId))))
             Write-ModioReport $sess $modioRef.user $modioRef.uid $modioRef.subs $iss
             return $iss
         } catch { $ui.Log('mod.io check failed: ' + $_.Exception.Message); return @() }
@@ -2180,7 +2237,16 @@ function Start-App {
     $applyFix = {
         param($is)
         try {
-            if ($is.fix -eq 'steam-verify') { Start-Process 'steam://validate/1091500'; $ui.Log('Health: asked Steam to verify the Cyberpunk 2077 game files. Wait for it to finish (Steam > Downloads), then press Play.'); $ui.Banner('Steam is verifying the game files. When it finishes, press Play.', @()) }
+            if ($is.fix -eq 'modio-use-game') {
+                $config.modioUseGame = $true; $chkUseGame.Checked = $true; Update-ModioSource $config; Save-Config $config
+                $modioRef.when = [datetime]::MinValue
+                if ($config.modioSource -eq 'game') {
+                    $ui.Log("mod.io: now using the game's own sign-in ('$($config.modioGameLogin.username)').")
+                    & $refreshInstalled
+                    $ui.Banner("The app now uses the game's own mod.io account. Click Start install to subscribe your mod.io mods there; the game downloads them from its Mods menu.", @())
+                } else { $ui.Log("mod.io: couldn't use the game's sign-in (it may have expired). Start the game, open Mods on the main menu, then try again.") }
+            }
+            elseif ($is.fix -eq 'steam-verify') { Start-Process 'steam://validate/1091500'; $ui.Log('Health: asked Steam to verify the Cyberpunk 2077 game files. Wait for it to finish (Steam > Downloads), then press Play.'); $ui.Banner('Steam is verifying the game files. When it finishes, press Play.', @()) }
             elseif ($is.fix -eq 'rename-modded') { if (Repair-EmptyModdedCache $config.gameDir) { $ui.Log('Health: renamed the empty r6\cache\modded folder.') } }
             elseif ($is.fix -like 'manual:*') {
                 $name = $is.fix.Substring(7); $dir = Join-Path $config.gameDir "V2077\mod-extra-files\$name"
@@ -2238,7 +2304,9 @@ function Start-App {
 
     # ---------------- settings ----------------
     $readSettings = {
-        $config.gameDir = $txtGame.Text.Trim(); $config.nexusKey = $k1.Text.Trim(); $config.modioToken = $k2.Text.Trim(); $config.modioApiPath = $k4.Text.Trim(); $config.githubToken = $k3.Text.Trim()
+        $config.gameDir = $txtGame.Text.Trim(); $config.nexusKey = $k1.Text.Trim(); $config.modioPat = $k2.Text.Trim(); $config.modioApiPath = $k4.Text.Trim(); $config.githubToken = $k3.Text.Trim()
+        $config.modioUseGame = $chkUseGame.Checked
+        Update-ModioSource $config
     }
     $preflight = {
         & $readSettings
@@ -2263,13 +2331,13 @@ function Start-App {
             Set-ModioBase $config.modioApiPath
             try {
                 $me = Invoke-Modio Get 'me' $config.modioToken
-                $out += "mod.io: signed in as $($me.username). This must be the account linked in the game's Mods menu."
+                $out += $(if ($config.modioSource -eq 'game') { "mod.io: using the game's own sign-in, account '$($me.username)'" + $(if ($config.modioGameLogin.portal) { " (shown in the game as $($config.modioGameLogin.portal))" } else { '' }) + '. Mods subscribed here are the ones the game downloads.' } else { "mod.io: signed in as $($me.username) with your token. This must be the same mod.io account the game uses (see Health check)." })
                 if ((Get-ModioTokenKind $config.modioToken) -eq 'oauth2') { $out += 'mod.io: this is an OAuth 2 token, which mod.io is phasing out. Create a Personal Access Token on mod.io/me/access when you can.' }
             } catch {
                 $code = Get-HttpStatus $_
                 $out += if ($code -eq 401) { 'mod.io: token rejected. It may have expired or been revoked; create a new Personal Access Token on mod.io/me/access.' } else { 'mod.io: could not connect (' + $_.Exception.Message + ').' }
             }
-        } else { $out += 'mod.io: no token. The mod.io mods will wait until you add one.' }
+        } else { $out += "mod.io: no sign-in. Start the game once and open Mods on the main menu so it signs in to mod.io, or add a token." }
         try { $info = Test-AppUpdate $config.githubToken; $out += if ($info) { "GitHub: connected, app update $($info.version) available" } else { 'GitHub: connected, the app is up to date' } } catch { $out += 'GitHub: ' + $_.Exception.Message }
         $setRes.Text = ($out -join [Environment]::NewLine)
     })
@@ -2451,6 +2519,11 @@ function Start-App {
             if (@($issues | Where-Object { $_.level -eq 'error' -and $_.id -notin @('scc-failed', 'redscript-errors') -and $_.id -notlike 'modio-*' }).Count -gt 0) { $ui.Banner('The health check found a problem that can stop the game from starting.', @('Open Health check')) }
             elseif (@($issues | Where-Object { $_.id -like 'modio-*' -and $_.level -eq 'error' }).Count -gt 0) { $ui.Banner('mod.io mods: ' + @($issues | Where-Object { $_.id -like 'modio-*' -and $_.level -eq 'error' })[0].title + '. See Health check.', @('Open Health check')) }
             elseif (@($issues | Where-Object { $_.id -eq 'scc-failed' }).Count -gt 0) { $ui.Banner('Your last game launch failed to compile mod scripts. If the Health check shows nothing else to fix, press Play to try again.', @('Open Health check')) }
+            if ($config.modioSource -eq 'game') {
+                $gl = $config.modioGameLogin
+                $ui.Log("mod.io: using the game's own sign-in '$($gl.username)'" + $(if ($gl.portal) { " (shown in the game as $($gl.portal))" } else { '' }) + '.')
+                if ($modioRef.subs -eq 0) { $ui.Banner("mod.io mods now go to the game's own mod.io account" + $(if ($gl.portal) { " ($($gl.portal))" } else { '' }) + '. Click Start install to subscribe them there (no clicks in the browser needed), then open Mods in the game.', @()) }
+            }
             if ($config.checkOnStart) { & $startCheck }
             if ($config.discoverOnStart) { & $startDiscovery }
             if ($grid.Rows.Count -gt 0) { $grid.Rows[0].Selected = $true; & $showDetails ([string]$grid.Rows[0].Tag) }

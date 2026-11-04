@@ -15,7 +15,12 @@ THE WINDOW (laid out like Vortex)
 
 FIRST RUN (one time, about 3 minutes)
   1. Open Settings in the sidebar.
-  2. mod.io token (needed for the mod.io mods):
+  2. mod.io: nothing to do if you have opened Mods in the game once. The game signs in to
+     mod.io through your CD PROJEKT RED account, and that is its OWN mod.io account (it may show
+     your CDPR name, e.g. Name#1234, but it is not the account you use on the mod.io website).
+     The game only downloads mods subscribed on that account, so the app uses the game's own
+     sign-in from this PC ("Use the game's own mod.io sign-in" in Settings, on by default).
+     A token is only a fallback for when the game hasn't signed in yet:
      mod.io is replacing OAuth 2 access tokens with Personal Access Tokens. The app accepts
      either in the same box, and tells you when you're still on an OAuth 2 token.
      Sign in at https://mod.io/me/access with the SAME account you linked in the game's Mods
