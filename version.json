@@ -1,10 +1,10 @@
 {
-  "version": "1.4.2",
-  "notes": "Health check now catches a replaced or missing game script cache (r6\\cache\\final.redscripts), the cause of 'Failed to load the original script cache', and fixes it with a Steam file verification.",
+  "version": "1.4.3",
+  "notes": "Health check now checks that the game's mod.io sign-in is the same account the app subscribes on, and warns when the game hasn't downloaded your mod.io mods. mod.io warnings never block Play.",
   "files": [
     {
       "path": "NightCityInstaller.ps1",
-      "sha256": "6EA2C710B3300F13E8BE95297D612142D4EBB389C15AABD805C86D111CDEECD2"
+      "sha256": "08DD599837D77A81F6ED84FF23E7F483F0E52964ECEDEDFF6AAA59403C9FFAC5"
     },
     {
       "path": "manifest.json",
@@ -12,7 +12,7 @@
     },
     {
       "path": "README.txt",
-      "sha256": "043D2D27729BB7CB55F8D685B77D5F29FFBC456F50B8CA47384FB82330F29A48"
+      "sha256": "DB4457AF9006EF2106EDDF50FB31BC86B63D4317C894C5F8A1115F61467A5C91"
     },
     {
       "path": "Start Night City Installer.bat",

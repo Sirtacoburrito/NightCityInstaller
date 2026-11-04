@@ -13,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 function Write-Trace([string]$m) { if ($env:NCI_DEBUG -eq '1') { try { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'trace.txt') -Value ((Get-Date -Format 'HH:mm:ss.fff') + '  ' + $m) } catch {} } }
 Write-Trace 'script loaded'
 $script:AppName    = 'Night City Installer'
-$script:AppVersion = '1.4.2'
+$script:AppVersion = '1.4.3'
 $script:Root       = $PSScriptRoot
 $script:IsWin      = ($env:OS -eq 'Windows_NT')
 if ($env:LOCALAPPDATA) { $script:DataDir = Join-Path $env:LOCALAPPDATA 'NightCityInstaller' }
@@ -934,6 +934,103 @@ function Get-HealthIssues([string]$GameDir) {
         }
     }
     return $issues
+}
+
+# ---------------------------------------------------------------- mod.io account check
+# The game signs in to mod.io through its own account link (CD PROJEKT RED / GOG). The mod.io
+# SDK keeps that session in %LOCALAPPDATA%\mod.io\<gameId>\<user>\ and downloaded mods in
+# C:\Users\Public\mod.io\<gameId>\mods. If that session belongs to a different mod.io account
+# than the app's token, the app's subscriptions never reach the game. This reads those folders
+# (names, JSON keys and user names only; token values are never read out or written anywhere).
+
+function Get-JsonUserInfo($Node, $Found, [int]$Depth = 0) {
+    if ($null -eq $Node -or $Depth -gt 8) { return }
+    if ($Node -is [System.Array]) { foreach ($n in $Node) { Get-JsonUserInfo $n $Found ($Depth + 1) }; return }
+    if ($Node -isnot [System.Management.Automation.PSCustomObject]) { return }
+    $props = @($Node.PSObject.Properties)
+    $names = @($props | ForEach-Object { $_.Name })
+    foreach ($pr in $props) {
+        $k = [string]$pr.Name
+        [void]$Found.keys.Add($k)
+        if ($k -match '^(username|name_id|display_?name|user_?name)$' -and $pr.Value -is [string] -and $pr.Value) { [void]$Found.users.Add([string]$pr.Value) }
+        if ($k -match '^(user_?id|id)$' -and ($names -match '^(username|name_id|user_?name)$') -and $pr.Value) { [void]$Found.ids.Add([string]$pr.Value) }
+        if ($k -match 'token|oauth|auth' -and $pr.Value) { $Found.token = $true }
+        if ($pr.Value -is [System.Management.Automation.PSCustomObject] -or $pr.Value -is [System.Array]) { Get-JsonUserInfo $pr.Value $Found ($Depth + 1) }
+    }
+}
+
+function Get-GameModioSession([int]$GameId) {
+    $r = [pscustomobject]@{ gameId = $GameId; userRoot = ''; userDirs = @(); users = @(); ids = @(); hasToken = $false; modsDir = ''; installed = -1; files = @(); otherGames = @() }
+    $local = Join-Path $env:LOCALAPPDATA 'mod.io'
+    $public = Join-Path $env:PUBLIC 'mod.io'
+    foreach ($root in @($local, $public)) {
+        if (Test-Path -LiteralPath $root) { $r.otherGames += @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) }
+    }
+    $r.otherGames = @($r.otherGames | Sort-Object -Unique)
+    $found = @{ users = (New-Object System.Collections.Generic.HashSet[string]); ids = (New-Object System.Collections.Generic.HashSet[string]); keys = (New-Object System.Collections.Generic.HashSet[string]); token = $false }
+    $ur = Join-Path $local "$GameId"
+    if (Test-Path -LiteralPath $ur) {
+        $r.userRoot = $ur
+        $r.userDirs = @(Get-ChildItem -LiteralPath $ur -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+        $files = New-Object System.Collections.ArrayList
+        foreach ($f in (Get-ChildItem -LiteralPath $ur -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 200)) {
+            $rel = $f.FullName.Substring($ur.Length).TrimStart('\')
+            $note = "$rel ($($f.Length) bytes)"
+            if ($f.Length -lt 2MB) {
+                try {
+                    $txt = [IO.File]::ReadAllText($f.FullName)
+                    if ($txt.TrimStart().StartsWith('{') -or $txt.TrimStart().StartsWith('[')) {
+                        $before = $found.keys.Count
+                        Get-JsonUserInfo ($txt | ConvertFrom-Json) $found
+                        $note += ' json'
+                    } else { $note += ' not json' }
+                } catch { $note += ' unreadable' }
+            }
+            [void]$files.Add($note)
+        }
+        $r.files = @($files)
+    }
+    $r.users = @($found.users); $r.ids = @($found.ids); $r.hasToken = $found.token
+    $r | Add-Member NoteProperty keys (@($found.keys | Sort-Object))
+    $md = Join-Path $public "$GameId\mods"
+    $r.modsDir = $md
+    if (Test-Path -LiteralPath $md) { $r.installed = @(Get-ChildItem -LiteralPath $md -Directory -ErrorAction SilentlyContinue).Count } else { $r.installed = 0 }
+    return $r
+}
+
+function Get-ModioLinkIssues($Session, [string]$TokenUser, [int]$TokenUserId, [int]$Subscribed) {
+    $issues = New-Object System.Collections.ArrayList
+    if (-not $Session) { return $issues }
+    if ($Session.userDirs.Count -eq 0) {
+        [void]$issues.Add([pscustomobject]@{ id = 'modio-not-linked'; level = 'error'; title = 'Cyberpunk is not signed in to mod.io on this PC'
+            detail = "The game has no mod.io sign-in yet, so it can't download your subscriptions. Start the game, open Mods on the main menu and link your account" + $(if ($TokenUser) { " as '$TokenUser'" } else { '' }) + '. Then return to the main menu so it downloads them.'; fix = '' })
+        return $issues
+    }
+    $known = @($Session.users) + @($Session.ids)
+    $match = ($TokenUser -and ($known -contains $TokenUser)) -or ($TokenUserId -and ($known -contains "$TokenUserId"))
+    if ($TokenUser -and $Session.users.Count -gt 0 -and -not $match) {
+        [void]$issues.Add([pscustomobject]@{ id = 'modio-account-mismatch'; level = 'error'; title = 'The game uses a different mod.io account'
+            detail = "The game is signed in to mod.io as '$(($Session.users) -join "', '")', but the app subscribes as '$TokenUser'. The game only downloads mods subscribed on its own account. In the game: Mods > account > sign out, then link '$TokenUser'. Or sign in at mod.io as '$(@($Session.users)[0])', create a token there and paste it in Settings."; fix = '' })
+    }
+    if ($Subscribed -gt 0 -and $Session.installed -eq 0) {
+        [void]$issues.Add([pscustomobject]@{ id = 'modio-nothing-downloaded'; level = 'warning'; title = "The game hasn't downloaded any mod.io mods yet"
+            detail = "$Subscribed mods are subscribed on '$TokenUser', but the game's mod.io folder has none. Start the game and open Mods on the main menu: it downloads subscriptions there. If 'My Collection' stays empty, the game is linked to another mod.io account (sign out there and link '$TokenUser')."; fix = '' })
+    }
+    return $issues
+}
+
+function Write-ModioReport($Session, [string]$TokenUser, [int]$TokenUserId, [int]$Subscribed, $Issues) {
+    $l = New-Object System.Collections.ArrayList
+    [void]$l.Add("Night City Installer $($script:AppVersion) - mod.io check $((Get-Date).ToString('yyyy-MM-dd HH:mm'))")
+    [void]$l.Add("App token account: '$TokenUser' (id $TokenUserId), $Subscribed Cyberpunk mods subscribed")
+    [void]$l.Add("Cyberpunk mod.io game id: $($Session.gameId); mod.io game folders on this PC: $($Session.otherGames -join ', ')")
+    [void]$l.Add("Game session folder: $($Session.userRoot)  users: $($Session.userDirs -join ', ')")
+    [void]$l.Add("Names found in the session: $($Session.users -join ', ')  ids: $($Session.ids -join ', ')  sign-in stored: $($Session.hasToken)")
+    [void]$l.Add("JSON keys: $($Session.keys -join ', ')")
+    [void]$l.Add("Downloaded mods folder: $($Session.modsDir)  count: $($Session.installed)")
+    [void]$l.Add('Files:'); foreach ($f in $Session.files) { [void]$l.Add("  $f") }
+    [void]$l.Add('Result:'); if (@($Issues).Count -eq 0) { [void]$l.Add('  no problem found') } else { foreach ($i in $Issues) { [void]$l.Add("  $($i.level): $($i.title) - $($i.detail)") } }
+    try { Set-Content -LiteralPath (Join-Path $script:Root 'modio-check.txt') -Value $l -Encoding UTF8 } catch {}
 }
 
 # Safe, reversible fix for the crash: rename the empty folder (never delete anything).
@@ -2050,9 +2147,26 @@ function Start-App {
     }
 
     # ---------------- health ----------------
+    $modioRef = @{ user = ''; uid = 0; subs = -1; when = [datetime]::MinValue }
+    $modioCheck = {
+        if (-not $config.modioToken -or -not $config.modioGameId) { return @() }
+        try {
+            if (((Get-Date) - $modioRef.when).TotalMinutes -gt 10) {
+                $me = Invoke-Modio Get 'me' $config.modioToken
+                $modioRef.user = [string]$me.username; $modioRef.uid = [int]$me.id
+                $modioRef.subs = (Get-ModioSubscribed $config.modioGameId $config.modioToken).Count
+                $modioRef.when = Get-Date
+            }
+            $sess = Get-GameModioSession ([int]$config.modioGameId)
+            $iss = @(Get-ModioLinkIssues $sess $modioRef.user $modioRef.uid $modioRef.subs)
+            Write-ModioReport $sess $modioRef.user $modioRef.uid $modioRef.subs $iss
+            return $iss
+        } catch { $ui.Log('mod.io check failed: ' + $_.Exception.Message); return @() }
+    }
     $runHealth = {
         $hGrid.Rows.Clear()
         $issues = @(Get-HealthIssues $config.gameDir)
+        $issues += @(& $modioCheck)
         if ($issues.Count -eq 0) { $i = $hGrid.Rows.Add('OK', 'No problems found', 'The game folder looks healthy.', ''); $c0 = New-Object Windows.Forms.DataGridViewTextBoxCell; $c0.Value = ''; $hGrid.Rows[$i].Cells['Fix'] = $c0 }
         foreach ($is in $issues) {
             $i = $hGrid.Rows.Add($is.level.ToUpper(), $is.title, $is.detail, $(if ($is.fix) { 'Fix' } else { '' }))
@@ -2299,7 +2413,7 @@ function Start-App {
         if (-not (& $preflight)) { & $showPage 'Settings'; return }
         try { if ($config.autoFix -and (Repair-EmptyModdedCache $config.gameDir)) { $ui.Log('Health: renamed an empty r6\cache\modded folder before launch (it would crash the game).') } } catch {}
         # Log-based errors describe the LAST launch; launching again is how they clear, so they don't block Play.
-        $issues = @(& $runHealth | Where-Object { $_.level -eq 'error' -and $_.id -notin @('scc-failed', 'redscript-errors') })
+        $issues = @(& $runHealth | Where-Object { $_.level -eq 'error' -and $_.id -notin @('scc-failed', 'redscript-errors') -and $_.id -notlike 'modio-*' })
         if ($issues.Count -gt 0) { $ui.Banner('The health check found a problem that can stop the game from starting.', @('Open Health check')); return }
         $ui.Log('Launching Cyberpunk 2077...')
         try { Start-Process 'steam://rungameid/1091500' } catch { Start-Process (Join-Path $config.gameDir 'bin\x64\Cyberpunk2077.exe') }
@@ -2334,7 +2448,8 @@ function Start-App {
             if ($gv) { $state['__gameVersion'] = @{ status = ''; detail = $gv; done = $false }; Save-State $state }
             & $refreshInstalled
             $issues = @(& $runHealth)
-            if (@($issues | Where-Object { $_.level -eq 'error' -and $_.id -notin @('scc-failed', 'redscript-errors') }).Count -gt 0) { $ui.Banner('The health check found a problem that can stop the game from starting.', @('Open Health check')) }
+            if (@($issues | Where-Object { $_.level -eq 'error' -and $_.id -notin @('scc-failed', 'redscript-errors') -and $_.id -notlike 'modio-*' }).Count -gt 0) { $ui.Banner('The health check found a problem that can stop the game from starting.', @('Open Health check')) }
+            elseif (@($issues | Where-Object { $_.id -like 'modio-*' -and $_.level -eq 'error' }).Count -gt 0) { $ui.Banner('mod.io mods: ' + @($issues | Where-Object { $_.id -like 'modio-*' -and $_.level -eq 'error' })[0].title + '. See Health check.', @('Open Health check')) }
             elseif (@($issues | Where-Object { $_.id -eq 'scc-failed' }).Count -gt 0) { $ui.Banner('Your last game launch failed to compile mod scripts. If the Health check shows nothing else to fix, press Play to try again.', @('Open Health check')) }
             if ($config.checkOnStart) { & $startCheck }
             if ($config.discoverOnStart) { & $startDiscovery }

@@ -133,6 +133,11 @@ HEALTH CHECK (sidebar)
   - Script compile errors from the last launch (redscript / RED4ext logs).
   - Files Vortex couldn't place (V2077\mod-extra-files). Fix installs them by hand, see below.
   - Mods that need the REDmod DLC.
+  - mod.io account link: the game signs in to mod.io through its own account link (Mods menu on
+    the main menu). It only downloads mods subscribed on THAT mod.io account. The check compares
+    the game's mod.io sign-in on this PC with the account of your token, and tells you if they
+    differ or if the game hasn't downloaded anything yet. Details are written to modio-check.txt
+    in the app folder (user names only, never tokens).
 
 REQUIREMENTS AND MANUAL INSTALLS
   - Before each Nexus mod, the app reads its "Requirements" section and queues any missing

@@ -570,6 +570,24 @@ Check 'repair renames empty folder' ((Repair-EmptyModdedCache $game) -and -not (
 New-Item -ItemType Directory (Join-Path $game 'r6/cache/modded') -Force | Out-Null; 'x' | Set-Content (Join-Path $game 'r6/cache/modded/final.redscripts')
 Check 'repair leaves a filled folder alone' (-not (Repair-EmptyModdedCache $game) -and (Test-Path (Join-Path $game 'r6/cache/modded/final.redscripts')))
 
+# mod.io account check
+$oldLocal = $env:LOCALAPPDATA; $oldPublic = $env:PUBLIC
+$env:LOCALAPPDATA = Join-Path $tmp 'la'; $env:PUBLIC = Join-Path $tmp 'pub'
+$sess0 = Get-GameModioSession 8254
+Check 'modio: no session means not linked' (@(Get-ModioLinkIssues $sess0 'RJCalzone' 5 30 | ? id -eq 'modio-not-linked').Count -eq 1)
+$ud = Join-Path $env:LOCALAPPDATA 'mod.io/8254/50716111627241556'; New-Item -ItemType Directory $ud -Force | Out-Null
+'{"OAuth":{"Token":"secret-value","ExpiryDate":1},"Profile":{"user_id":99,"username":"OtherUser"}}' | Set-Content (Join-Path $ud 'user.json')
+New-Item -ItemType Directory (Join-Path $env:PUBLIC 'mod.io/8254/metadata') -Force | Out-Null
+$sess1 = Get-GameModioSession 8254
+Check 'modio: session user read' (($sess1.users -contains 'OtherUser') -and $sess1.hasToken -and $sess1.installed -eq 0)
+$i1 = @(Get-ModioLinkIssues $sess1 'RJCalzone' 5 30)
+Check 'modio: account mismatch flagged' (@($i1 | ? id -eq 'modio-account-mismatch').Count -eq 1 -and @($i1 | ? id -eq 'modio-nothing-downloaded').Count -eq 1)
+Check 'modio: matching account not flagged' (@(Get-ModioLinkIssues $sess1 'OtherUser' 99 30 | ? id -eq 'modio-account-mismatch').Count -eq 0)
+$script:Root = $tmp; Write-ModioReport $sess1 'RJCalzone' 5 30 $i1
+$rep = Get-Content (Join-Path $tmp 'modio-check.txt') -Raw
+Check 'modio: report has no token value' (($rep -match 'OtherUser') -and ($rep -notmatch 'secret-value'))
+$env:LOCALAPPDATA = $oldLocal; $env:PUBLIC = $oldPublic
+
 # engine: requirement first, dependent held when the requirement has no 2.5 file
 $P2 = [long]([datetimeoffset][datetime]'2026-10-22T00:00:00Z').ToUnixTimeSeconds()
 $script:Calls = New-Object System.Collections.ArrayList
