@@ -11,7 +11,7 @@ param([switch]$TestMode)
 
 $ErrorActionPreference = 'Stop'
 $script:AppName    = 'Night City Installer'
-$script:AppVersion = '1.1.0'
+$script:AppVersion = '1.2.0'
 $script:Root       = $PSScriptRoot
 $script:IsWin      = ($env:OS -eq 'Windows_NT')
 if ($env:LOCALAPPDATA) { $script:DataDir = Join-Path $env:LOCALAPPDATA 'NightCityInstaller' }
@@ -19,6 +19,7 @@ else { $script:DataDir = Join-Path ([IO.Path]::GetTempPath()) 'NightCityInstalle
 $script:DefaultGameDir = 'C:\Steam Modded\Steam\steamapps\common\Cyberpunk 2077'
 $script:NexusBase = 'https://api.nexusmods.com/v1'
 $script:ModioBase = 'https://api.mod.io/v1'
+$script:Glyph = @{ ok = [string][char]0x2713; up = [string][char]0x2191; dot = [string][char]0x2022 }
 $script:FrameworkIds = @{ 107='Cyber Engine Tweaks'; 2380='RED4ext'; 1511='redscript'; 4198='ArchiveXL'; 4197='TweakXL'; 7780='Codeware'; 4885='Mod Settings'; 3518='Native Settings UI' }
 
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
@@ -99,7 +100,7 @@ function Load-Manifest([string]$Path) {
         $null = $items.Add([pscustomobject]@{
             key = $key; kind = 'install'; order = $order; batch = [int]$x.batch; source = [string]$x.source; name = [string]$x.name
             id = if ($x.id) { [int]$x.id } else { 0 }; query = [string]$x.query; exclude = [string]$x.exclude
-            optional = [bool]$x.optional })
+            optional = [bool]$x.optional; verify = [bool]$x.verify; note = [string]$x.note })
         $order++
     }
     $batches = @{}
@@ -658,6 +659,14 @@ function Step-Nexus($E, $item) {
         return
     }
     $fileId = $null; $detail = 'Pick the newest main file'
+    if ($item.verify -and -not $E.config.nexusKey) {
+        # These mods have no published 2.5 confirmation, so they only install after the app has
+        # checked Nexus for a post-patch file. That check needs the Nexus key.
+        Set-ItemState $E $item 'Needs Nexus key' 'Add your Nexus key under Accounts so the app can confirm a 2.5 file' $false
+        $E.ui.Log("Skipped $($item.name): needs the Nexus key to confirm a 2.5 file.")
+        Complete-Item $E 'skipped'
+        return
+    }
     if ($E.config.nexusKey) {
         $files = Invoke-Nexus "games/$($E.manifest.game)/mods/$($item.id)/files.json" $E.config.nexusKey
         $sel = Select-NexusMainFile $files $E.manifest.patchDate
@@ -668,9 +677,10 @@ function Step-Nexus($E, $item) {
         $fileId = $sel.file.file_id
         $detail = "v$($sel.file.version), uploaded $($sel.date.ToString('yyyy-MM-dd'))"
         if (-not $sel.postPatch) {
-            # Keep the setup 2.5-safe without asking: a file older than the patch is skipped.
-            Set-ItemState $E $item 'Skipped' "Newest file ($detail) is older than patch 2.5" $true
-            $E.ui.Log("Skipped $($item.name): its newest main file predates patch 2.5.")
+            # Keep the setup 2.5-safe without asking: a file older than the patch is skipped, and
+            # left open (not done) so a later run installs it once the author posts a 2.5 file.
+            Set-ItemState $E $item 'Waiting for 2.5 update' "Newest file ($detail) is older than patch 2.5" $false
+            $E.ui.Log("Waiting: $($item.name) has no 2.5 file yet. It will install once the author posts one.")
             Complete-Item $E 'skipped'
             return
         }
@@ -740,6 +750,27 @@ function Invoke-EngineAction($E, [string]$Action) {
         "It's installed"  { if ($item) { Set-ItemState $E $item 'Installed' 'Marked installed by you' $true; $E.ui.Log("Marked installed: $($item.name)"); Complete-Item $E 'installed'; $E.ui.Banner('', @()) } }
         'Skip'            { if ($item) { Set-ItemState $E $item 'Skipped' 'Skipped by you' $true; $E.ui.Log("Skipped: $($item.name)"); Complete-Item $E 'skipped'; $E.ui.Banner('', @()) } }
     }
+}
+
+# What is already in place for every list item, without asking any server about Nexus:
+# Nexus mods come from Vortex's files; mod.io mods are matched against your subscriptions
+# (pass $null when there is no mod.io token, and those rows stay "unknown").
+function Get-InstallSnapshot($Manifest, [string]$GameDir, $ModioSubs) {
+    $snap = @{}
+    $nexus = Get-InstalledNexusMods $GameDir
+    foreach ($it in $Manifest.items) {
+        if ($it.source -eq 'nexus') {
+            if ($nexus.ContainsKey($it.id)) { $snap[$it.key] = [pscustomobject]@{ installed = $true; detail = "v$($nexus[$it.id].version) in Vortex" } }
+            else { $snap[$it.key] = [pscustomobject]@{ installed = $false; detail = '' } }
+        } elseif ($null -ne $ModioSubs) {
+            $sel = Select-ModioMatch $ModioSubs $it.query $it.exclude
+            $hit = $sel.match
+            if (-not $hit -and $sel.choices.Count -gt 0) { $hit = $sel.choices[0] }
+            if ($hit) { $snap[$it.key] = [pscustomobject]@{ installed = $true; detail = "Subscribed: $($hit.name)" } }
+            else { $snap[$it.key] = [pscustomobject]@{ installed = $false; detail = '' } }
+        }
+    }
+    return $snap
 }
 
 function Get-PreflightWarnings($Config) {
@@ -814,9 +845,11 @@ function Start-App {
     $list.View = 'Details'; $list.CheckBoxes = $true; $list.FullRowSelect = $true; $list.Dock = 'Fill'; $list.HideSelection = $false
     [void]$list.Columns.Add('Mod', 330); [void]$list.Columns.Add('Source', 70); [void]$list.Columns.Add('Status', 150); [void]$list.Columns.Add('Detail', 470)
     $rows = @{}
-    foreach ($bid in ($manifest.batches.Keys | Sort-Object)) {
-        $b = $manifest.batches[$bid]
-        [void]$list.Groups.Add((New-Object Windows.Forms.ListViewGroup("b$bid", "$bid. $($b.name)")))
+    $gi = 0
+    foreach ($bid in @($manifest.items | ForEach-Object { $_.batch } | Select-Object -Unique)) {
+        $gi++; $b = $manifest.batches[$bid]
+        $src = if ($b.source -eq 'modio') { 'mod.io' } else { 'Nexus' }
+        [void]$list.Groups.Add((New-Object Windows.Forms.ListViewGroup("b$bid", "$gi. $($b.name)   [$src]")))
     }
     foreach ($it in $manifest.items) {
         $row = New-Object Windows.Forms.ListViewItem($it.name)
@@ -827,7 +860,7 @@ function Start-App {
         $row.Tag = $it.key
         $row.Group = $list.Groups["b$($it.batch)"]
         $row.Checked = (-not $it.optional) -and (-not $done)
-        if ($done) { $row.ForeColor = [Drawing.Color]::Gray }
+        if ($it.note -and -not $dt) { $row.SubItems[3].Text = $it.note }
         [void]$list.Items.Add($row)
         $rows[$it.key] = @{ row = $row; statusCol = 2; detailCol = 3 }
     }
@@ -841,7 +874,14 @@ function Start-App {
     $chkPause = New-Object Windows.Forms.CheckBox; $chkPause.Text = 'Pause after each batch so I can test the game'; $chkPause.AutoSize = $true
     $chkPause.Margin = New-Object Windows.Forms.Padding(16, 8, 0, 0); $chkPause.Checked = [bool]$config.pauseBetweenBatches
     $bottom.Controls.AddRange(@($btnStart, $btnPause, $btnAll, $btnNone, $btnReset, $chkPause))
-    $tabInstall.Controls.Add($list); $tabInstall.Controls.Add($bottom)
+    $summary = New-Object Windows.Forms.Panel; $summary.Dock = 'Top'; $summary.Height = 58; $summary.Padding = New-Object Windows.Forms.Padding(8, 6, 8, 4)
+    $sumText = New-Object Windows.Forms.Label; $sumText.Dock = 'Top'; $sumText.Height = 26; $sumText.Font = New-Object Drawing.Font('Segoe UI Semibold', 12)
+    $sumLegend = New-Object Windows.Forms.Label; $sumLegend.Dock = 'Top'; $sumLegend.Height = 22; $sumLegend.ForeColor = [Drawing.Color]::DimGray
+    $sumLegend.Text = "Green rows with $($script:Glyph.ok) are already installed and need nothing.  Yellow rows are waiting for a 2.5 file or a key.  White rows will be installed."
+    $summary.Controls.Add($sumLegend); $summary.Controls.Add($sumText)
+    $btnRefresh = New-Object Windows.Forms.Button; $btnRefresh.Text = 'Refresh installed'; $btnRefresh.Width = 130; $btnRefresh.Height = 30
+    $bottom.Controls.Add($btnRefresh); $bottom.Controls.SetChildIndex($btnRefresh, 5)
+    $tabInstall.Controls.Add($list); $tabInstall.Controls.Add($summary); $tabInstall.Controls.Add($bottom)
 
     # Updates tab
     $updHeader = New-Object Windows.Forms.Label; $updHeader.Dock = 'Top'; $updHeader.Height = 50; $updHeader.Padding = New-Object Windows.Forms.Padding(6, 6, 6, 0)
@@ -871,6 +911,48 @@ function Start-App {
 
     $engineRef = @{ E = $null; C = $null; AppUpdate = $null }
 
+    $looks = @{
+        ok     = @{ back = [Drawing.Color]::FromArgb(222, 244, 226); fore = [Drawing.Color]::FromArgb(22, 101, 52) }
+        update = @{ back = [Drawing.Color]::FromArgb(255, 232, 204); fore = [Drawing.Color]::FromArgb(154, 52, 18) }
+        wait   = @{ back = [Drawing.Color]::FromArgb(254, 249, 214); fore = [Drawing.Color]::FromArgb(113, 63, 18) }
+        fail   = @{ back = [Drawing.Color]::FromArgb(254, 226, 226); fore = [Drawing.Color]::FromArgb(153, 27, 27) }
+        busy   = @{ back = [Drawing.Color]::FromArgb(224, 236, 255); fore = [Drawing.Color]::FromArgb(30, 64, 175) }
+        none   = @{ back = [Drawing.Color]::White; fore = [Drawing.Color]::Black }
+    }
+    $setLook = {
+        param($r, [string]$kind)
+        $r.UseItemStyleForSubItems = $true
+        $r.BackColor = $looks[$kind].back; $r.ForeColor = $looks[$kind].fore
+        $r.Font = if ($kind -eq 'ok') { $font } elseif ($kind -eq 'update') { $bold } else { $font }
+    }
+    $lookFor = {
+        param([string]$status)
+        if ($status -match '^(Installed|Updated|Subscribed|Already|Up to date)') { return 'ok' }
+        if ($status -match '^(Waiting for 2\.5|Needs)') { return 'wait' }
+        if ($status -match '^(Failed|Not found)') { return 'fail' }
+        if ($status -match '^Update available') { return 'update' }
+        if ($status -match '^(Waiting for your click|Working)') { return 'busy' }
+        if ($status -eq 'Skipped') { return 'none' }
+        return 'none'
+    }
+    $decorate = {
+        param([string]$status)
+        $k = & $lookFor $status
+        if ($k -eq 'ok' -and -not $status.StartsWith($script:Glyph.ok)) { return "$($script:Glyph.ok) $status" }
+        if ($k -eq 'update' -and -not $status.StartsWith($script:Glyph.up)) { return "$($script:Glyph.up) $status" }
+        return $status
+    }
+    $updateSummary = {
+        $inst = 0; $wait = 0; $todo = 0
+        foreach ($it in $manifest.items) {
+            $t = $rows[$it.key].row.SubItems[2].Text
+            $k = & $lookFor ($t -replace "^[^A-Za-z]+", '')
+            if ($k -eq 'ok') { $inst++ } elseif ($k -eq 'wait') { $wait++ } elseif ($rows[$it.key].row.Checked) { $todo++ }
+        }
+        $sumText.Text = "$($script:Glyph.ok) $inst installed      $($script:Glyph.dot) $todo ticked to install      $($script:Glyph.dot) $wait waiting      (of $($manifest.items.Count) in the list)"
+        $sumText.ForeColor = $looks.ok.fore
+    }
+
     # ---- UI adapter used by the engine and the update checker
     $ui = [pscustomobject]@{}
     $ui | Add-Member ScriptMethod Log {
@@ -883,20 +965,13 @@ function Start-App {
         param($key, $status, $detail)
         $entry = $rows[$key]; if (-not $entry) { return }
         $r = $entry.row
-        $r.SubItems[$entry.statusCol].Text = $status
+        $r.SubItems[$entry.statusCol].Text = (& $decorate $status)
         if ($entry.detailCol -ge 0) { $r.SubItems[$entry.detailCol].Text = $detail }
-        switch -Wildcard ($status) {
-            'Installed'   { $r.ForeColor = [Drawing.Color]::ForestGreen }
-            'Updated'     { $r.ForeColor = [Drawing.Color]::ForestGreen; $r.Checked = $false }
-            'Subscribed'  { $r.ForeColor = [Drawing.Color]::ForestGreen }
-            'Already*'    { $r.ForeColor = [Drawing.Color]::Gray }
-            'Up to date'  { $r.ForeColor = [Drawing.Color]::Gray; $r.Checked = $false }
-            'Skipped'     { $r.ForeColor = [Drawing.Color]::Gray }
-            'Failed'      { $r.ForeColor = [Drawing.Color]::Firebrick }
-            'Not found'   { $r.ForeColor = [Drawing.Color]::Firebrick }
-            default       { $r.ForeColor = [Drawing.Color]::DarkGoldenrod }
-        }
+        $k = & $lookFor $status
+        & $setLook $r $k
+        if ($k -eq 'ok') { $r.Checked = $false }
         $r.EnsureVisible()
+        if ($entry.statusCol -eq 2) { & $updateSummary }
     }
     $ui | Add-Member ScriptMethod Banner {
         param($text, $buttons)
@@ -924,9 +999,13 @@ function Start-App {
         }
         $r = $entry.row
         $r.Tag = $res
-        $r.SubItems[2].Text = [string]$res.installed; $r.SubItems[3].Text = [string]$res.latest; $r.SubItems[4].Text = [string]$res.status
+        $r.SubItems[2].Text = [string]$res.installed; $r.SubItems[3].Text = [string]$res.latest; $r.SubItems[4].Text = (& $decorate ([string]$res.status))
         $r.Checked = [bool]$res.update
-        if ($res.update) { $r.ForeColor = [Drawing.Color]::DarkOrange } elseif ($res.status -like 'Updated*') { $r.ForeColor = [Drawing.Color]::DarkOrange } else { $r.ForeColor = [Drawing.Color]::Gray }
+        if ($res.update) { & $setLook $r 'update' }
+        elseif ($res.status -like 'Updated*') { & $setLook $r 'busy' }
+        elseif ($res.status -like 'Up to date*') { & $setLook $r 'ok' }
+        elseif ($res.status -like 'Add a Nexus key*') { & $setLook $r 'wait' }
+        else { & $setLook $r 'fail' }
     }
     $ui | Add-Member ScriptMethod CheckFinished {
         param($n)
@@ -939,6 +1018,44 @@ function Start-App {
                 $ui.Banner("$n of your Nexus mods have updates. Open the Updates tab and click 'Update ticked'. Frameworks go first.", @())
             }
         } else { $ui.Log('Update check: everything is up to date.') }
+    }
+
+    $refreshInstalled = {
+        if (-not $config.gameDir -or -not (Test-Path -LiteralPath $config.gameDir)) { return }
+        $subs = $null
+        if ($config.modioToken) {
+            try {
+                if (-not $config.modioGameId) { $config.modioGameId = Resolve-ModioGameId $config.modioToken; Save-Config $config }
+                $subs = @(Get-ModioSubscribedDetails $config.modioGameId $config.modioToken)
+            } catch { $ui.Log('Could not read your mod.io subscriptions: ' + $_.Exception.Message) }
+        }
+        $snap = Get-InstallSnapshot $manifest $config.gameDir $subs
+        $n = 0
+        foreach ($it in $manifest.items) {
+            $entry = $rows[$it.key]; $r = $entry.row
+            if (-not $snap.ContainsKey($it.key)) {
+                $saved = if ($state.ContainsKey($it.key)) { $state[$it.key].status } else { '' }
+                $r.SubItems[2].Text = (& $decorate $saved); & $setLook $r (& $lookFor $saved)
+                continue
+            }
+            $s = $snap[$it.key]
+            if ($s.installed) {
+                $n++
+                $r.SubItems[2].Text = (& $decorate $(if ($it.source -eq 'nexus') { 'Installed' } else { 'Subscribed' })); $r.SubItems[3].Text = $s.detail
+                & $setLook $r 'ok'; $r.Checked = $false
+            } else {
+                $saved = if ($state.ContainsKey($it.key)) { $state[$it.key].status } else { '' }
+                if ((& $lookFor $saved) -eq 'ok') {
+                    # was installed earlier but is gone now (removed in Vortex or unsubscribed)
+                    $state.Remove($it.key); $saved = ''
+                    $r.SubItems[3].Text = 'Not installed any more'; $r.Checked = -not $it.optional
+                }
+                $r.SubItems[2].Text = (& $decorate $saved); & $setLook $r (& $lookFor $saved)
+            }
+        }
+        Save-State $state
+        & $updateSummary
+        $ui.Log("Installed check: $n of $($manifest.items.Count) list mods are already in place.")
     }
 
     function Update-AccountLabel {
@@ -1056,15 +1173,18 @@ function Start-App {
         }
     })
 
-    $btnAll.Add_Click({ foreach ($r in $list.Items) { $r.Checked = $true } })
-    $btnNone.Add_Click({ foreach ($r in $list.Items) { $r.Checked = $false } })
+    $btnRefresh.Add_Click({ if (Show-Preflight) { & $refreshInstalled } })
+    $btnAll.Add_Click({ foreach ($r in $list.Items) { if ((& $lookFor ($r.SubItems[2].Text -replace '^[^A-Za-z]+', '')) -ne 'ok') { $r.Checked = $true } }; & $updateSummary })
+    $btnNone.Add_Click({ foreach ($r in $list.Items) { $r.Checked = $false }; & $updateSummary })
+    $list.Add_ItemChecked({ if ($sumText) { & $updateSummary } })
     $btnReset.Add_Click({
         $a = [Windows.Forms.MessageBox]::Show('Clear all saved install progress? Mods already installed stay installed and are detected again.', $script:AppName, 'YesNo', 'Question')
         if ($a -eq 'Yes') {
             foreach ($k in @($state.Keys | Where-Object { $_ -notlike '__*' })) { $state.Remove($k) }
             Save-State $state
-            foreach ($it in $manifest.items) { $r = $rows[$it.key].row; $r.SubItems[2].Text = ''; $r.SubItems[3].Text = ''; $r.ForeColor = [Drawing.Color]::Black; $r.Checked = -not $it.optional }
+            foreach ($it in $manifest.items) { $r = $rows[$it.key].row; $r.SubItems[2].Text = ''; $r.SubItems[3].Text = ''; & $setLook $r 'none'; $r.Checked = -not $it.optional }
             $ui.Log('Install progress cleared.')
+            & $refreshInstalled
         }
     })
 
@@ -1076,7 +1196,10 @@ function Start-App {
         $script:Busy = $true
         try {
             Step-Engine $engineRef.E
-            if ($engineRef.E.mode -in @('done', 'paused')) { $btnStart.Enabled = $true; $btnPause.Enabled = $false; $btnStart.Text = 'Start'; $btnUpdate.Enabled = $true }
+            if ($engineRef.E.mode -in @('done', 'paused')) {
+                $btnStart.Enabled = $true; $btnPause.Enabled = $false; $btnStart.Text = 'Start'; $btnUpdate.Enabled = $true
+                if ($engineRef.E.mode -eq 'done') { $timer.Stop(); & $refreshInstalled }
+            }
         } catch { $ui.Log('Error: ' + $_.Exception.Message) }
         finally { $script:Busy = $false }
     })
@@ -1143,7 +1266,7 @@ function Start-App {
             $ui.Log("Game version changed: $prev -> $gv")
         }
         if ($gv) { $state['__gameVersion'] = @{ status = ''; detail = $gv; done = $false }; Save-State $state }
-        if ($config.checkOnStart) { $form.Add_Shown({ & $startCheck }) }
+        $form.Add_Shown({ & $refreshInstalled; if ($config.checkOnStart) { & $startCheck } })
     }
     [void]$form.ShowDialog()
     $timer.Stop(); $chkTimer.Stop()

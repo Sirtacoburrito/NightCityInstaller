@@ -1,18 +1,18 @@
 {
-  "version": "1.1.0",
-  "notes": "Adds the Updates tab: checks every Vortex-installed Nexus mod and your mod.io subscriptions for updates, warns when the game is patched, and updates the app itself from GitHub.",
+  "version": "1.2.0",
+  "notes": "113 mods: 53 new Nexus mods for 2.5 (fixes, cyberware, vehicles, homes, weapons, optional overhauls, romance and adult groups). Installed mods are now shown in green with a check mark, with a summary bar. Mods without a 2.5 file wait and install automatically once updated.",
   "files": [
     {
       "path": "NightCityInstaller.ps1",
-      "sha256": "421666556AD3ED0127B143A60319357096E1BFDB3F8AA51ECD99A2B54A5F9DD7"
+      "sha256": "45A186F1F008A298BB72AC7F8D380EFF22C06D0B4E336529892EFD587DCB2311"
     },
     {
       "path": "manifest.json",
-      "sha256": "6D0AE5AACDE50CB6DE3E3850CB2BF6D85A8B658787229D1CAAD5B3601EE8018B"
+      "sha256": "A307A1920BC7E2854890494FD2D4B088A00E1277447FBB8DF2AAA2F51EF9F775"
     },
     {
       "path": "README.txt",
-      "sha256": "FED95FC67EBAAB00D9B3124FD8AAE7CA80387662073F015409398AE6F2E1D282"
+      "sha256": "0E5549606C832BD7F3A8A632E58F7AE4582134293BFAF83EC1F2EFDF69ECCCB1"
     },
     {
       "path": "Start Night City Installer.bat",

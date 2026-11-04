@@ -112,7 +112,7 @@ $ui | Add-Member ScriptMethod Banner { param($t, $b) [void]$banners.Add($t) }
 $ui | Add-Member ScriptMethod OpenUrl { param($u) [void]$opened.Add($u) }
 
 $manifest = Load-Manifest (Join-Path $AppDir 'manifest.json')
-Check 'manifest item count' ($manifest.items.Count -eq 68) "count $($manifest.items.Count)"
+Check 'manifest item count' ($manifest.items.Count -eq 113) "count $($manifest.items.Count)"
 Check 'manifest unique keys' (@($manifest.items | % key | Sort-Object -Unique).Count -eq $manifest.items.Count)
 Check 'every nexus item has an id' (@($manifest.items | ? { $_.source -eq 'nexus' -and -not $_.id }).Count -eq 0)
 Check 'every batch defined' (@($manifest.items | ? { -not $manifest.batches.ContainsKey($_.batch) }).Count -eq 0)
@@ -136,7 +136,7 @@ while ($E.mode -ne 'done' -and $guard -lt 200) {
 Check 'engine finished' ($E.mode -eq 'done') "mode $($E.mode)"
 Check 'nexus pages opened in order (skips installed Stealthrunner and pre-patch Zoomable Scopes)' (($opened -join ',') -eq 'https://www.nexusmods.com/cyberpunk2077/mods/4575?tab=files&file_id=45750&nmm=1,https://www.nexusmods.com/cyberpunk2077/mods/5208?tab=files&file_id=52080&nmm=1') ($opened -join ',')
 Check 'Stealthrunner already (found in Vortex staging)' ($state['nexus:7616'].status -eq 'Already installed')
-Check 'Zoomable pre-patch skipped' ($state['nexus:3543'].status -eq 'Skipped')
+Check 'Zoomable pre-patch waits for a 2.5 file (not done)' ($state['nexus:3543'].status -eq 'Waiting for 2.5 update' -and -not $state['nexus:3543'].done)
 Check 'Input Loader installed' ($state['nexus:4575'].status -eq 'Installed')
 Check 'Borg already subscribed' ($state['modio:Borg Malorian Restored'].status -eq 'Already subscribed')
 Check 'Hot Fuzz not found' ($state['modio:Hot Fuzz'].status -eq 'Not found')
@@ -148,7 +148,7 @@ Check 'state persisted' ((Load-State).Count -eq 9)
 # resume: second run only queues what isn't done
 $E2 = New-Engine $manifest $cfg (Load-State) $ui
 Start-Engine $E2 $keys
-Check 'resume queues only unfinished (Hot Fuzz)' ($E2.queue.Count -eq 1 -and $E2.queue[0].key -eq 'modio:Hot Fuzz') ($E2.queue | % key)
+Check 'resume re-queues unfinished (Zoomable waiting + Hot Fuzz)' (($E2.queue | % key) -join ',' -eq 'nexus:3543,modio:Hot Fuzz') (($E2.queue | % key) -join ',')
 
 # checkpoints when enabled
 Remove-Item (Join-Path $script:DataDir 'state.json')
@@ -186,7 +186,29 @@ Invoke-EngineAction $E5 "It's installed"
 Step-Engine $E5
 Check 'no token -> pauses with message' ($E5.mode -eq 'paused')
 
+# verify-tier mod without a Nexus key is held back, not installed blind
+$opened.Clear()
+$E6 = New-Engine $manifest $cfg5 @{} $ui
+Start-Engine $E6 @('nexus:36374')
+Step-Engine $E6
+Check 'verify mod needs key' ($E6.state['nexus:36374'].status -eq 'Needs Nexus key' -and $opened.Count -eq 0 -and -not $E6.state['nexus:36374'].done)
+
+# install snapshot: Vortex + mod.io subscriptions
+New-Item -ItemType Directory (Join-Path $staging 'Input Loader-4575-0-2-5-1761400000') -Force | Out-Null
+$subs = @((MM 101 'Deceptious Quest Core' 1), (MM 104 'Borg Malorian Restored' 1), (MM 4 'Challenging Breach Minigame - 0.5x Time' 1))
+$snap = Get-InstallSnapshot $manifest $game $subs
+Check 'snapshot nexus installed' ($snap['nexus:4575'].installed -and $snap['nexus:4575'].detail -match '^v.+ in Vortex$') ("$($snap['nexus:4575'] | ConvertTo-Json -Compress) | staging: $((Get-ChildItem $staging | % Name) -join ';')") $snap['nexus:4575'].detail
+Check 'snapshot nexus missing' (-not $snap['nexus:7238'].installed)
+Check 'snapshot modio subscribed' ($snap['modio:Deceptious Quest Core'].installed -and $snap['modio:Borg Malorian Restored'].installed)
+Check 'snapshot modio excluded variant not counted' (-not $snap['modio:Challenging Breach Minigame'].installed)
+Check 'snapshot modio unsubscribed' (-not $snap['modio:Hot Fuzz'].installed)
+$snap2 = Get-InstallSnapshot $manifest $game $null
+Check 'snapshot without token leaves mod.io unknown' (-not $snap2.ContainsKey('modio:Hot Fuzz') -and $snap2.ContainsKey('nexus:4575'))
+Check 'manifest: verify flags loaded' (@($manifest.items | ? verify).Count -gt 20)
+Check 'manifest: adult batch optional' (@($manifest.items | ? { $_.batch -eq 25 -and -not $_.optional }).Count -eq 0)
+
 Remove-Item $tmp -Recurse -Force
+
 Write-Host "install tests: passed $pass, failed $fail"
 
 # ================= updater tests =================
@@ -322,21 +344,21 @@ function Invoke-WebRequest {
     Copy-Item (Join-Path $repo $name) $OutFile
 }
 $script:Root = $appRoot
-Write-Version '1.2.0' $null
+Write-Version '1.3.0' $null
 $threw = $false; try { Test-AppUpdate '' } catch { $threw = $_.Exception.Message -like '*private*' }
 Check 'no token on private repo explains' $threw
 $info = Test-AppUpdate 'GH'
-Check 'newer version offered' ($info -and $info.version -eq '1.2.0')
-Write-Version '1.1.0' $null
+Check 'newer version offered' ($info -and $info.version -eq '1.3.0')
+Write-Version '1.2.0' $null
 Check 'same version not offered' ($null -eq (Test-AppUpdate 'GH'))
-Write-Version '1.2.0' @{ 'manifest.json' = 'DEADBEEF' }
+Write-Version '1.3.0' @{ 'manifest.json' = 'DEADBEEF' }
 $threw = $false; try { Install-AppUpdate (Test-AppUpdate 'GH') 'GH' } catch { $threw = $true }
 Check 'bad hash aborts' $threw
 Check 'nothing changed after bad hash' ((Get-Content (Join-Path $appRoot 'NightCityInstaller.ps1')) -eq 'old ps1')
 $bad = [pscustomobject]@{ version = '9.9.9'; files = @([pscustomobject]@{ path = '..\evil.ps1'; sha256 = 'x' }) }
 $threw = $false; try { Install-AppUpdate $bad 'GH' } catch { $threw = $_.Exception.Message -like '*unsafe*' }
 Check 'path traversal blocked' $threw
-Write-Version '1.2.0' $null
+Write-Version '1.3.0' $null
 $bk = Install-AppUpdate (Test-AppUpdate 'GH') 'GH'
 Check 'files replaced' ((Get-Content (Join-Path $appRoot 'NightCityInstaller.ps1')) -eq 'new ps1' -and (Get-Content (Join-Path $appRoot 'manifest.json')) -eq 'new manifest')
 Check 'backup kept' ((Get-Content (Join-Path $bk 'NightCityInstaller.ps1')) -eq 'old ps1')

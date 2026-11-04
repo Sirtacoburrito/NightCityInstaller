@@ -1,4 +1,4 @@
-NIGHT CITY INSTALLER 1.1
+NIGHT CITY INSTALLER 1.2
 Installs the "Night City Load Order" mod list for Cyberpunk 2077 patch 2.5, in order.
 
 START
@@ -6,11 +6,11 @@ START
 
 FIRST RUN (one time, about 3 minutes)
   1. Click "Accounts...".
-  2. mod.io token (needed for the 41 mod.io mods):
+  2. mod.io token (needed for the 41 mod.io mods in the list of 113):
      Sign in at mod.io with the SAME account you linked in the game's Mods menu.
      Open https://mod.io/me/access, create an OAuth 2 client, then create a token with
      Read and Write access. Paste it into the app.
-  3. Nexus API key (optional, recommended):
+  3. Nexus API key (strongly recommended; required for about 40 of the newer mods):
      https://next.nexusmods.com/settings/api-keys  ->  "Personal API Key".
      With it, the app opens the exact 2.5 file for each mod and skips any mod whose newest
      file is older than the patch. Without it, it opens the mod's Files tab and you pick
@@ -21,6 +21,35 @@ IN VORTEX (check once)
   Settings > Downloads: "Handle Nexus links" on.
   Settings > Interface/Downloads: install and enable mods automatically after download (default).
   Settings > Mods: "Deploy mods when enabled" on (default).
+
+WHAT'S ALREADY INSTALLED
+  Every time the app opens (and after each install run) it checks Vortex and your mod.io
+  subscriptions. Rows that are already in place turn GREEN with a check mark and are unticked,
+  so nothing is downloaded twice. The bar above the list counts installed, ticked and waiting
+  mods. Click "Refresh installed" after changing mods in Vortex.
+    Green  + check mark : installed / subscribed / up to date, nothing to do
+    Yellow              : waiting for a 2.5 file from the author, or needs your Nexus key
+    Blue                : waiting for your "Slow download" click
+    Red                 : failed or not found
+    White               : will be installed when ticked
+  On the Updates tab, green rows are up to date and orange rows (with an arrow) have an update.
+
+HOW THE LIST STAYS 2.5-SAFE
+  - Mods confirmed for 2.5 by their authors install normally.
+  - Newer mods without a published 2.5 note are checked on Nexus first: the app installs them
+    only if their newest main file was uploaded after the 2.5 patch (22 Oct 2026). This needs
+    your Nexus key; without it they show "Needs Nexus key" and are left alone.
+  - Any mod whose newest file is older than the patch shows "Waiting for 2.5 update" and is
+    retried on every run, so it installs by itself once the author updates it. The last
+    group, "Waiting for 2.5 updates", holds popular mods like Appearance Menu Mod for this.
+  - Mods that clash with your setup are not in the list: HUD replacements (you use a custom HUD
+    layout), "no dismemberment" (you use Relentless Live Dismember), other dual-wield mods
+    (you use Expanded Dual Wielding) and wardrobe UI replacements (Equipment-EX).
+
+OPTIONAL GROUPS (unticked by default)
+  Big overhauls, character looks and voice, romance, and Adult 18+ (spawn0 body mod and its
+  2.5 fix). Tick what you want. Adult mods on Nexus only show for accounts with adult content
+  turned on (nexusmods.com > Settings > Content blocking).
 
 INSTALLING
   Click Start.
