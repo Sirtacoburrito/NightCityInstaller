@@ -1,10 +1,10 @@
 {
-  "version": "1.4.1",
-  "notes": "Nexus photos now show (WebP images are converted). The app restarts through its launcher after an update, with a safety net so the window can't stay hidden. Requirements show [installed] or [MISSING].",
+  "version": "1.4.2",
+  "notes": "Health check now catches a replaced or missing game script cache (r6\\cache\\final.redscripts), the cause of 'Failed to load the original script cache', and fixes it with a Steam file verification.",
   "files": [
     {
       "path": "NightCityInstaller.ps1",
-      "sha256": "95FCA1CC179AB08C606F2230216008FDF55D0410CF30AB5F1D230577441EA7B7"
+      "sha256": "6EA2C710B3300F13E8BE95297D612142D4EBB389C15AABD805C86D111CDEECD2"
     },
     {
       "path": "manifest.json",
@@ -12,7 +12,7 @@
     },
     {
       "path": "README.txt",
-      "sha256": "62FBAF3283BB7D9F79DB4A789F3472BABF3DAE74EF6157BFAEC2573F9BAB16B8"
+      "sha256": "043D2D27729BB7CB55F8D685B77D5F29FFBC456F50B8CA47384FB82330F29A48"
     },
     {
       "path": "Start Night City Installer.bat",

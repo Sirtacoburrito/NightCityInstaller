@@ -127,6 +127,9 @@ HEALTH CHECK (sidebar)
   Runs on start-up and before Play. It looks for:
   - An empty r6\cache\modded folder. This makes the game crash on start ("Failed to load the
     original script cache"). Fix renames it to _modded_empty_<time>; nothing is deleted.
+  - A replaced or missing r6\cache\final.redscripts (the game's own script cache, about 20 MB).
+    If something overwrites it, every launch fails with "Failed to load the original script
+    cache". Fix asks Steam to verify the game files, which restores it and keeps your mods.
   - Script compile errors from the last launch (redscript / RED4ext logs).
   - Files Vortex couldn't place (V2077\mod-extra-files). Fix installs them by hand, see below.
   - Mods that need the REDmod DLC.

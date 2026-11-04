@@ -13,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 function Write-Trace([string]$m) { if ($env:NCI_DEBUG -eq '1') { try { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'trace.txt') -Value ((Get-Date -Format 'HH:mm:ss.fff') + '  ' + $m) } catch {} } }
 Write-Trace 'script loaded'
 $script:AppName    = 'Night City Installer'
-$script:AppVersion = '1.4.1'
+$script:AppVersion = '1.4.2'
 $script:Root       = $PSScriptRoot
 $script:IsWin      = ($env:OS -eq 'Windows_NT')
 if ($env:LOCALAPPDATA) { $script:DataDir = Join-Path $env:LOCALAPPDATA 'NightCityInstaller' }
@@ -886,6 +886,20 @@ function Get-HealthIssues([string]$GameDir) {
     if ((Test-Path -LiteralPath $modded) -and -not (Get-ChildItem -LiteralPath $modded -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
         [void]$issues.Add([pscustomobject]@{ id = 'empty-modded-cache'; level = 'error'; title = 'Empty REDmod script cache folder'
             detail = 'r6\cache\modded exists but is empty. The script compiler then fails ("Failed to load the original script cache") and the game crashes on start-up.'; fix = 'rename-modded' })
+    }
+    # The game's own script cache is about 20 MB. A much smaller file means it was overwritten
+    # (e.g. by a mod or tool that wrote its compiled scripts there) and every launch fails with
+    # "Failed to load the original script cache". Only Steam can restore the original.
+    $orig = Join-Path $GameDir 'r6\cache\final.redscripts'
+    if (Test-Path -LiteralPath $orig) {
+        $len = (Get-Item -LiteralPath $orig).Length
+        if ($len -lt 2MB) {
+            [void]$issues.Add([pscustomobject]@{ id = 'script-cache-damaged'; level = 'error'; title = "The game's script cache has been replaced"
+                detail = ("r6\cache\final.redscripts is only {0:N0} KB (the game's own file is about 20 MB), so mod scripts can't compile and the game crashes. Fix asks Steam to verify the game files, which restores it and leaves your mods alone. Wait for Steam to finish, then press Play." -f [Math]::Ceiling($len / 1KB)); fix = 'steam-verify' })
+        }
+    } else {
+        [void]$issues.Add([pscustomobject]@{ id = 'script-cache-missing'; level = 'error'; title = "The game's script cache is missing"
+            detail = 'r6\cache\final.redscripts is missing. Fix asks Steam to verify the game files, which restores it.'; fix = 'steam-verify' })
     }
     $logDir = Join-Path $GameDir 'red4ext\logs'
     $last = Get-ChildItem -LiteralPath $logDir -Filter 'red4ext-*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -2052,7 +2066,8 @@ function Start-App {
     $applyFix = {
         param($is)
         try {
-            if ($is.fix -eq 'rename-modded') { if (Repair-EmptyModdedCache $config.gameDir) { $ui.Log('Health: renamed the empty r6\cache\modded folder.') } }
+            if ($is.fix -eq 'steam-verify') { Start-Process 'steam://validate/1091500'; $ui.Log('Health: asked Steam to verify the Cyberpunk 2077 game files. Wait for it to finish (Steam > Downloads), then press Play.'); $ui.Banner('Steam is verifying the game files. When it finishes, press Play.', @()) }
+            elseif ($is.fix -eq 'rename-modded') { if (Repair-EmptyModdedCache $config.gameDir) { $ui.Log('Health: renamed the empty r6\cache\modded folder.') } }
             elseif ($is.fix -like 'manual:*') {
                 $name = $is.fix.Substring(7); $dir = Join-Path $config.gameDir "V2077\mod-extra-files\$name"
                 $res = Invoke-ManualInstall $config.gameDir (Get-ManualInstallPlan $dir $name) "extra:$name"
@@ -2320,7 +2335,7 @@ function Start-App {
             & $refreshInstalled
             $issues = @(& $runHealth)
             if (@($issues | Where-Object { $_.level -eq 'error' -and $_.id -notin @('scc-failed', 'redscript-errors') }).Count -gt 0) { $ui.Banner('The health check found a problem that can stop the game from starting.', @('Open Health check')) }
-            elseif (@($issues | Where-Object { $_.id -eq 'scc-failed' }).Count -gt 0) { $ui.Banner('Your last game launch failed to compile mod scripts (see Health check). The known cause is fixed; press Play to try again.', @('Open Health check')) }
+            elseif (@($issues | Where-Object { $_.id -eq 'scc-failed' }).Count -gt 0) { $ui.Banner('Your last game launch failed to compile mod scripts. If the Health check shows nothing else to fix, press Play to try again.', @('Open Health check')) }
             if ($config.checkOnStart) { & $startCheck }
             if ($config.discoverOnStart) { & $startDiscovery }
             if ($grid.Rows.Count -gt 0) { $grid.Rows[0].Selected = $true; & $showDetails ([string]$grid.Rows[0].Tag) }
