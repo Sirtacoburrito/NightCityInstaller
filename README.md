@@ -4,7 +4,9 @@ A Windows app that installs a stability-checked mod list for **Cyberpunk 2077 pa
 
 - **Nexus mods** install through **Vortex**: the app opens each file's page, you click *Slow download* (Nexus requires that click on free accounts), Vortex installs it, and the app moves on by itself.
 - **mod.io mods** (the official in-game mod catalog) are subscribed through the mod.io API with their requirements. The game downloads them from its Mods menu.
-- **Installed mods show in green** with a check mark and a summary bar, so nothing is downloaded twice.
+- **Installed mods show in green** with a check mark and are locked unless an update is available, so nothing is downloaded twice.
+- **Finds new mods on start-up**: the official mod.io catalog plus well-used Nexus mods with files from after the patch, filtered for clashes.
+- **mod.io Personal Access Tokens** are supported (older OAuth 2 tokens still work).
 - **Updates tab**: checks every Vortex-installed Nexus mod and your mod.io subscriptions for newer versions (frameworks first), warns when the game itself is patched, and updates the app from this repo after verifying each file's SHA-256.
 
 ## Use

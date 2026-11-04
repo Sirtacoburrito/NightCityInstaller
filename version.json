@@ -1,10 +1,10 @@
 {
-  "version": "1.2.1",
-  "notes": "mod.io mods now install first (no clicks needed), so they no longer wait behind the Nexus downloads. A missing mod.io token no longer stops the Nexus part. The log shows which mod.io account is used.",
+  "version": "1.3.0",
+  "notes": "Accepts mod.io Personal Access Tokens (and still OAuth 2), with an optional mod.io API path. Finds new 2.5-compatible mods on mod.io and Nexus at start-up and adds them to the list. Installed mods are locked unless an update is available. Fixes the patch date being read in local time.",
   "files": [
     {
       "path": "NightCityInstaller.ps1",
-      "sha256": "A1AFE84DC28F5496F74B35ED17D84AD3034127BFA8502EAC0D348FD7E81022BF"
+      "sha256": "47AC494EFC7A0A194F48B8356AE9E1B7C2CFDF5C7035942EE37C5DF097D374E7"
     },
     {
       "path": "manifest.json",
@@ -12,7 +12,7 @@
     },
     {
       "path": "README.txt",
-      "sha256": "0E5549606C832BD7F3A8A632E58F7AE4582134293BFAF83EC1F2EFDF69ECCCB1"
+      "sha256": "C7390547749E2D4DFCA4DC37B705D405E6DCFD0F9AD0A98A377174266E9AD57C"
     },
     {
       "path": "Start Night City Installer.bat",

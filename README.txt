@@ -1,4 +1,4 @@
-NIGHT CITY INSTALLER 1.2
+NIGHT CITY INSTALLER 1.3
 Installs the "Night City Load Order" mod list for Cyberpunk 2077 patch 2.5, in order.
 
 START
@@ -6,10 +6,13 @@ START
 
 FIRST RUN (one time, about 3 minutes)
   1. Click "Accounts...".
-  2. mod.io token (needed for the 41 mod.io mods in the list of 113):
-     Sign in at mod.io with the SAME account you linked in the game's Mods menu.
-     Open https://mod.io/me/access, create an OAuth 2 client, then create a token with
-     Read and Write access. Paste it into the app.
+  2. mod.io token (needed for the mod.io mods):
+     mod.io is replacing OAuth 2 access tokens with Personal Access Tokens. The app accepts
+     either in the same box, and tells you when you're still on an OAuth 2 token.
+     Sign in at https://mod.io/me/access with the SAME account you linked in the game's Mods
+     menu, create a Personal Access Token with read and write access, and paste it in.
+     If that page shows a personal API path (like https://u-12345.modapi.io/v1), paste it in
+     the "mod.io API path" box too; otherwise leave that box empty.
   3. Nexus API key (strongly recommended; required for about 40 of the newer mods):
      https://next.nexusmods.com/settings/api-keys  ->  "Personal API Key".
      With it, the app opens the exact 2.5 file for each mod and skips any mod whose newest
@@ -22,10 +25,24 @@ IN VORTEX (check once)
   Settings > Interface/Downloads: install and enable mods automatically after download (default).
   Settings > Mods: "Deploy mods when enabled" on (default).
 
+NEW MODS FOUND AUTOMATICALLY
+  Each time the app opens it looks for more mods that work with your game version and adds them
+  at the bottom of the list (turn this off on the Updates tab):
+  - mod.io: every mod in the official catalog that isn't in the list yet. CD PROJEKT RED approves
+    these for the current patch, so they are ticked (mature ones unticked).
+  - Nexus (needs your Nexus key): mods with a file uploaded since the patch, at least 10
+    endorsements or 1,000 downloads, and nothing that clashes with your setup (HUD, dismemberment,
+    dual-wield, wardrobe, flashlight, translations, AMM add-ons, older-version builds, modder
+    resources). They are unticked: open each one's page and check its requirements first. Adult
+    finds go in their own group.
+  Finds are remembered in %LOCALAPPDATA%\NightCityInstaller\discovered.json.
+
 WHAT'S ALREADY INSTALLED
   Every time the app opens (and after each install run) it checks Vortex and your mod.io
-  subscriptions. Rows that are already in place turn GREEN with a check mark and are unticked,
-  so nothing is downloaded twice. The bar above the list counts installed, ticked and waiting
+  subscriptions. Rows that are already in place turn GREEN with a check mark and are LOCKED:
+  they can't be ticked, so nothing is downloaded twice. When the update check finds a newer
+  file for one of them, the row turns ORANGE with an arrow, unlocks and is ticked; Start then
+  installs the update. (mod.io rows stay locked because the game updates those itself.) The bar above the list counts installed, ticked and waiting
   mods. Click "Refresh installed" after changing mods in Vortex.
     Green  + check mark : installed / subscribed / up to date, nothing to do
     Yellow              : waiting for a 2.5 file from the author, or needs your Nexus key

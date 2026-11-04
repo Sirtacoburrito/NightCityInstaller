@@ -326,6 +326,7 @@ Check 'update detected and finished' ($E.mode -eq 'done' -and $E.counts.installe
 Check 'update not written to install state' (-not (Test-Path (Join-Path $script:DataDir 'state.json')) -or -not ((Load-State).ContainsKey('update:4198')))
 
 # app self-update with a fake GitHub
+$script:AppVersion = '1.2.0'   # pin: the test writes 1.3.0 (newer) and 1.2.0 (same)
 $repo = Join-Path $tmp 'repo'; New-Item -ItemType Directory $repo | Out-Null
 $appRoot = Join-Path $tmp 'app'; New-Item -ItemType Directory $appRoot | Out-Null
 'old ps1' | Set-Content (Join-Path $appRoot 'NightCityInstaller.ps1')
@@ -365,5 +366,141 @@ Check 'files replaced' ((Get-Content (Join-Path $appRoot 'NightCityInstaller.ps1
 Check 'backup kept' ((Get-Content (Join-Path $bk 'NightCityInstaller.ps1')) -eq 'old ps1')
 
 Remove-Item $tmp -Recurse -Force
+
+# ================= 1.3 tests: tokens, discovery, locked/updatable rows =================
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ("ncl-13-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory $tmp | Out-Null
+$script:DataDir = Join-Path $tmp 'data'
+$game = Join-Path $tmp 'game'; $staging = Join-Path $tmp 'staging'
+New-Item -ItemType Directory (Join-Path $game 'bin/x64') -Force | Out-Null; New-Item -ItemType Directory $staging | Out-Null
+$dep = Get-Content $DeploymentJson -Raw | ConvertFrom-Json; $dep.stagingPath = $staging
+$dep | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $game 'vortex.deployment.json')
+
+# token kinds + API path
+$jwe = 'eyJlbmMiOiJBMTI4Q0JDIn0.AAAA_bb-cc.DDDD.EEEE-ff.GGGG'
+Check 'oauth2 token detected' ((Get-ModioTokenKind $jwe) -eq 'oauth2')
+Check 'PAT detected' ((Get-ModioTokenKind 'modio_pat_1234567890abcdef') -eq 'pat')
+Check 'empty token' ((Get-ModioTokenKind '  ') -eq 'none')
+Set-ModioBase 'https://u-12345.modapi.io'; Check 'api path adds /v1' ($script:ModioBase -eq 'https://u-12345.modapi.io/v1') $script:ModioBase
+Set-ModioBase 'https://g-3456.modapi.io/v1/'; Check 'api path trims slash' ($script:ModioBase -eq 'https://g-3456.modapi.io/v1')
+Set-ModioBase 'https://evil.example.com/v1'; Check 'foreign host refused' ($script:ModioBase -eq 'https://api.mod.io/v1')
+Set-ModioBase ''; Check 'default api path' ($script:ModioBase -eq 'https://api.mod.io/v1')
+
+# blocklist
+Check 'block HUD' ((Get-DiscoveryBlockReason 'DynamicHUD - Contextual HUD') -like 'HUD*')
+Check 'block translation' ((Get-DiscoveryBlockReason 'RomanceHangoutsEnhanced-11590-2.5.3-CHS') -like 'Translation*')
+Check 'block German' ((Get-DiscoveryBlockReason 'German Language for Appearance Menu Mod') -ne $null)
+Check 'block old version' ((Get-DiscoveryBlockReason 'The Kings Outfit for 2.31 and lower') -like '*older*')
+Check 'block dual wield' ((Get-DiscoveryBlockReason 'Gorilla Akimbo') -like '*Dual*')
+Check 'allow normal mod' ($null -eq (Get-DiscoveryBlockReason 'Villa V - North Oak Player Mansion'))
+Check 'allow "it" word' ($null -eq (Get-DiscoveryBlockReason 'Make It Rain - Better Weather'))
+
+# mocked APIs for discovery
+$P = [long]([datetimeoffset][datetime]'2026-10-22T00:00:00Z').ToUnixTimeSeconds()
+$script:Calls = New-Object System.Collections.ArrayList
+$script:LastHeaders = $null
+function NX($id, $name, $end, $dl, $ts, [bool]$adult = $false) { [pscustomobject]@{ mod_id = $id; name = $name; available = $true; status = 'published'; endorsement_count = $end; mod_downloads = $dl; updated_timestamp = $ts; contains_adult_content = $adult } }
+$script:NexusMods = @{
+    50001 = (NX 50001 'Cool New Quest' 120 9000 ($P + 1000))
+    50002 = (NX 50002 'Shiny HUD Overhaul' 300 20000 ($P + 2000))
+    50003 = (NX 50003 'Tiny Tweak' 2 40 ($P + 3000))
+    50004 = (NX 50004 'Spicy Body Pack' 80 15000 ($P + 4000) $true)
+    4198  = (NX 4198 'ArchiveXL' 9999 999999 ($P + 5000))
+}
+function Invoke-RestMethod {
+    param($Method = 'Get', $Uri, $Headers, $ContentType, $Body, $TimeoutSec)
+    $u = [string]$Uri; [void]$script:Calls.Add($u); $script:LastHeaders = $Headers
+    if ($u -like '*mods/updated.json*') { return @(
+        [pscustomobject]@{ mod_id = 50001; latest_file_update = $P + 1000 }, [pscustomobject]@{ mod_id = 50002; latest_file_update = $P + 2000 },
+        [pscustomobject]@{ mod_id = 50003; latest_file_update = $P + 3000 }, [pscustomobject]@{ mod_id = 50004; latest_file_update = $P + 4000 },
+        [pscustomobject]@{ mod_id = 4198; latest_file_update = $P + 5000 }, [pscustomobject]@{ mod_id = 50009; latest_file_update = $P - 9999 }) }
+    if ($u -like '*mods/trending.json') { return @((NX 50010 'Trending Gun Pack' 500 50000 ($P + 100)), (NX 50011 'Old Classic' 900 90000 ($P - 5000))) }
+    if ($u -like '*mods/latest_added.json' -or $u -like '*mods/latest_updated.json') { return @() }
+    if ($u -match 'nexusmods.com/v1/games/cyberpunk2077/mods/(\d+)\.json$') { return $script:NexusMods[[int]$Matches[1]] }
+    if ($u -like '*games?name_id=*') { return [pscustomobject]@{ data = @([pscustomobject]@{ id = 5555 }) } }
+    if ($u -match 'games/5555/mods\?_limit=100&_offset=0') { return [pscustomobject]@{ data = @(
+        [pscustomobject]@{ id = 101; name = 'Deceptious Quest Core'; maturity_option = 0 },
+        [pscustomobject]@{ id = 701; name = 'Brand New Gig'; maturity_option = 0 },
+        [pscustomobject]@{ id = 702; name = 'Steamy Thing'; maturity_option = 2 }) } }
+    if ($u -like '*/v1/me') { return [pscustomobject]@{ username = 'tester' } }
+    if ($u -like '*me/subscribed*') { return [pscustomobject]@{ data = @() } }
+    if ($Method -eq 'Post' -and $u -match 'mods/(\d+)/subscribe') { return [pscustomobject]@{ id = [int]$Matches[1] } }
+    if ($u -match 'mods/(\d+)/dependencies') { return [pscustomobject]@{ data = @() } }
+    if ($u -match 'games/5555/mods\?_q=') { throw "search should not run for discovered mod.io items: $u" }
+    throw "Unmocked $u"
+}
+$null = Invoke-Modio Get 'me' "  $jwe  "
+Check 'bearer header trimmed' ($script:LastHeaders['Authorization'] -eq "Bearer $jwe")
+Check 'platform header' ($script:LastHeaders['X-Modio-Platform'] -eq 'windows')
+
+$manifestD = Load-Manifest (Join-Path $AppDir 'manifest.json')
+$cfgD = @{ gameDir = $game; nexusKey = 'K'; modioToken = 'T'; githubToken = ''; modioGameId = 0; pauseBetweenBatches = $false; checkOnStart = $true; modioApiPath = ''; discoverOnStart = $true }
+$found = @{ keys = $null }
+$uiD = [pscustomobject]@{}
+$uiD | Add-Member ScriptMethod Log { param($m) }
+$uiD | Add-Member ScriptMethod DiscoveryFinished { param($k) $found.keys = @($k) }
+$before = $manifestD.items.Count
+$D = New-Discovery $manifestD $cfgD (Read-DiscoveryStore) (Get-InstalledNexusIds $game) $uiD
+$g = 0; while (-not $D.done -and $g -lt 200) { $g++; Step-Discovery $D }
+Check 'discovery finished' $D.done
+$keys = ($found.keys | Sort-Object) -join ','
+Check 'discovery adds the right mods' ($keys -eq 'modio:id:701,modio:id:702,nexus:50001,nexus:50004,nexus:50010') $keys
+Check 'HUD mod rejected with reason' ($D.store.nexus['50002'].reason -like 'HUD*')
+Check 'little-used rejected' ($D.store.nexus['50003'].reason -like 'Little-used*')
+Check 'installed ArchiveXL not re-added' (-not (Test-InManifest $manifestD 'nexus:4198'))
+Check 'pre-patch trending mod rejected' ($D.store.nexus['50011'].reason -eq 'No file since the patch')
+Check 'pre-patch update feed entry ignored' (-not $D.store.nexus.ContainsKey('50009'))
+Check 'mod.io already-listed skipped' ($D.store.modio['101'].reason -eq 'Already in the list')
+$i701 = $manifestD.items | ? key -eq 'modio:id:701'; $i702 = $manifestD.items | ? key -eq 'modio:id:702'
+$i1 = $manifestD.items | ? key -eq 'nexus:50001'; $i4 = $manifestD.items | ? key -eq 'nexus:50004'
+Check 'mod.io find ticked by default' ($i701.batch -eq 90 -and -not $i701.optional -and $i701.modioId -eq 701)
+Check 'mature mod.io find unticked' ($i702.batch -eq 91 -and $i702.optional)
+Check 'nexus find is verify + unticked' ($i1.batch -eq 92 -and $i1.optional -and $i1.verify)
+Check 'adult nexus find in adult group' ($i4.batch -eq 93)
+Check 'manifest grew' ($manifestD.items.Count -eq $before + 5)
+Check 'store saved' (Test-Path (Join-Path $script:DataDir 'discovered.json'))
+# second run: nothing new, details not fetched again
+$script:Calls.Clear()
+$m2 = Load-Manifest (Join-Path $AppDir 'manifest.json')
+$pre = Add-DiscoveredToManifest $m2 (Read-DiscoveryStore) (Get-InstalledNexusIds $game)
+Check 'stored finds re-added on next start' ($pre.Count -eq 5)
+$D2 = New-Discovery $m2 $cfgD (Read-DiscoveryStore) (Get-InstalledNexusIds $game) $uiD
+$g = 0; while (-not $D2.done -and $g -lt 200) { $g++; Step-Discovery $D2 }
+Check 'second run finds nothing new' ($found.keys.Count -eq 0) ($found.keys -join ',')
+Check 'second run does not refetch details' (@($script:Calls | ? { $_ -match '/mods/\d+\.json$' }).Count -eq 0) (@($script:Calls) -join ' ')
+
+# discovered mod.io item subscribes by id (no search)
+$uiE = [pscustomobject]@{}
+$uiE | Add-Member ScriptMethod Log { param($m) }
+$uiE | Add-Member ScriptMethod SetStatus { param($k, $s, $d) }
+$uiE | Add-Member ScriptMethod Banner { param($t, $b) }
+$opened3 = New-Object System.Collections.ArrayList
+$uiE | Add-Member ScriptMethod OpenUrl { param($u) [void]$opened3.Add($u) }
+$cfgD.modioGameId = 5555
+$EE = New-Engine $m2 $cfgD @{} $uiE
+Start-Engine $EE @('modio:id:701')
+Step-Engine $EE
+Check 'discovered mod.io subscribed by id' ($EE.state['modio:id:701'].status -eq 'Subscribed' -and (@($script:Calls) -match 'mods/701/subscribe').Count -eq 1)
+
+# installed list mod with an update goes through the update path
+$axlTs = [long]([datetimeoffset][datetime]::Parse('2026-10-29T12:59:00Z')).ToUnixTimeSeconds()
+New-Item -ItemType Directory (Join-Path $staging ('Wannabe Edgerunner-5646-3-0-1-' + $axlTs)) | Out-Null
+$EU = New-Engine $m2 $cfgD @{} $uiE
+$EU.updates = @{ 5646 = [pscustomobject]@{ id = 5646; latest = '3.1.0'; latestTs = $axlTs + 50000; fileId = 999; installed = '3.0.1' } }
+Start-Engine $EU @('nexus:5646')
+Step-Engine $EU
+Check 'installed mod with update opens update file' ($opened3[-1] -eq 'https://www.nexusmods.com/cyberpunk2077/mods/5646?tab=files&file_id=999&nmm=1' -and $EU.mode -eq 'waitNexus') $opened3[-1]
+Step-Engine $EU
+Check 'old version does not count as updated' ($EU.mode -eq 'waitNexus')
+New-Item -ItemType Directory (Join-Path $staging ('Wannabe Edgerunner-5646-3-1-0-' + ($axlTs + 50000))) | Out-Null
+Step-Engine $EU; Step-Engine $EU
+Check 'update recognised' ($EU.mode -eq 'done' -and $EU.counts.installed -eq 1)
+$EN = New-Engine $m2 $cfgD @{} $uiE
+Start-Engine $EN @('nexus:5646')
+Step-Engine $EN
+Check 'installed mod without update stays skipped as installed' ($EN.state['nexus:5646'].status -eq 'Already installed')
+
+Remove-Item $tmp -Recurse -Force
+
 Write-Host "TOTAL passed $pass, failed $fail"
 if ($fail -gt 0) { exit 1 }

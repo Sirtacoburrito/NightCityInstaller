@@ -11,7 +11,7 @@ param([switch]$TestMode)
 
 $ErrorActionPreference = 'Stop'
 $script:AppName    = 'Night City Installer'
-$script:AppVersion = '1.2.1'
+$script:AppVersion = '1.3.0'
 $script:Root       = $PSScriptRoot
 $script:IsWin      = ($env:OS -eq 'Windows_NT')
 if ($env:LOCALAPPDATA) { $script:DataDir = Join-Path $env:LOCALAPPDATA 'NightCityInstaller' }
@@ -60,10 +60,12 @@ function Write-JsonFile([string]$Path, $Object) {
 
 function Load-Config {
     $c = Read-JsonFile (Join-Path $script:DataDir 'config.json')
-    $cfg = @{ gameDir = ''; nexusKey = ''; modioToken = ''; githubToken = ''; modioGameId = 0; pauseBetweenBatches = $false; checkOnStart = $true }
+    $cfg = @{ gameDir = ''; nexusKey = ''; modioToken = ''; githubToken = ''; modioGameId = 0; pauseBetweenBatches = $false; checkOnStart = $true; modioApiPath = ''; discoverOnStart = $true }
     if ($c) {
         if ($c.PSObject.Properties['pauseBetweenBatches']) { $cfg.pauseBetweenBatches = [bool]$c.pauseBetweenBatches }
         if ($c.PSObject.Properties['checkOnStart']) { $cfg.checkOnStart = [bool]$c.checkOnStart }
+        if ($c.PSObject.Properties['discoverOnStart']) { $cfg.discoverOnStart = [bool]$c.discoverOnStart }
+        if ($c.PSObject.Properties['modioApiPath'] -and $c.modioApiPath) { $cfg.modioApiPath = [string]$c.modioApiPath }
         if ($c.PSObject.Properties['githubToken'] -and $c.githubToken) { $cfg.githubToken = Unprotect-Text ([string]$c.githubToken) }
         if ($c.gameDir)     { $cfg.gameDir = [string]$c.gameDir }
         if ($c.nexusKey)    { $cfg.nexusKey = Unprotect-Text ([string]$c.nexusKey) }
@@ -71,13 +73,16 @@ function Load-Config {
         if ($c.modioGameId) { $cfg.modioGameId = [int]$c.modioGameId }
     }
     if (-not $cfg.gameDir -and (Test-Path -LiteralPath $script:DefaultGameDir)) { $cfg.gameDir = $script:DefaultGameDir }
+    Set-ModioBase $cfg.modioApiPath
     return $cfg
 }
 
 function Save-Config($cfg) {
     Write-JsonFile (Join-Path $script:DataDir 'config.json') ([ordered]@{
         gameDir = $cfg.gameDir; nexusKey = (Protect-Text $cfg.nexusKey); modioToken = (Protect-Text $cfg.modioToken); modioGameId = $cfg.modioGameId
-        pauseBetweenBatches = [bool]$cfg.pauseBetweenBatches; checkOnStart = [bool]$cfg.checkOnStart; githubToken = (Protect-Text $cfg.githubToken) })
+        pauseBetweenBatches = [bool]$cfg.pauseBetweenBatches; checkOnStart = [bool]$cfg.checkOnStart; githubToken = (Protect-Text $cfg.githubToken)
+        modioApiPath = [string]$cfg.modioApiPath; discoverOnStart = [bool]$cfg.discoverOnStart })
+    Set-ModioBase $cfg.modioApiPath
 }
 
 function Load-State {
@@ -100,12 +105,12 @@ function Load-Manifest([string]$Path) {
         $null = $items.Add([pscustomobject]@{
             key = $key; kind = 'install'; order = $order; batch = [int]$x.batch; source = [string]$x.source; name = [string]$x.name
             id = if ($x.id) { [int]$x.id } else { 0 }; query = [string]$x.query; exclude = [string]$x.exclude
-            optional = [bool]$x.optional; verify = [bool]$x.verify; note = [string]$x.note })
+            optional = [bool]$x.optional; verify = [bool]$x.verify; note = [string]$x.note; modioId = 0; discovered = $false })
         $order++
     }
     $batches = @{}
     foreach ($b in $m.batches) { $batches[[int]$b.id] = [pscustomobject]@{ id = [int]$b.id; name = [string]$b.name; source = [string]$b.source } }
-    return [pscustomobject]@{ game = [string]$m.game; patchDate = [datetime]::Parse([string]$m.patchDate, [Globalization.CultureInfo]::InvariantCulture); items = $items; batches = $batches }
+    return [pscustomobject]@{ game = [string]$m.game; patchDate = [datetime]::Parse([string]$m.patchDate, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AssumeUniversal,AdjustToUniversal'); items = $items; batches = $batches }
 }
 
 # ---------------------------------------------------------------- Vortex detection
@@ -266,8 +271,27 @@ function Invoke-Nexus([string]$Path, [string]$Key) {
     return Invoke-RestMethod -Method Get -Uri "$($script:NexusBase)/$Path" -Headers $h -TimeoutSec 30
 }
 
+# mod.io is moving from OAuth 2 access tokens to Personal Access Tokens. Both are sent the same
+# way (Authorization: Bearer), so the app accepts either in the same field. The API path can be
+# overridden with the one shown on mod.io/me/access (for example https://u-12345.modapi.io/v1).
+function Set-ModioBase([string]$Path) {
+    $p = ([string]$Path).Trim()
+    if ($p -match '^https://[A-Za-z0-9.-]+(\.mod\.io|\.modapi\.io)(/v1)?/?$') {
+        $p = $p.TrimEnd('/'); if ($p -notmatch '/v1$') { $p += '/v1' }
+        $script:ModioBase = $p
+    } else { $script:ModioBase = 'https://api.mod.io/v1' }
+}
+
+# OAuth 2 tokens from mod.io are JWE strings (five dot-separated parts starting with eyJ).
+function Get-ModioTokenKind([string]$Token) {
+    $t = ([string]$Token).Trim()
+    if (-not $t) { return 'none' }
+    if ($t -match '^eyJ[\w-]*\.[\w-]*\.[\w-]*\.[\w-]*\.[\w-]*$') { return 'oauth2' }
+    return 'pat'
+}
+
 function Invoke-Modio([string]$Method, [string]$Path, [string]$Token) {
-    $h = @{ Authorization = "Bearer $Token"; Accept = 'application/json' }
+    $h = @{ Authorization = "Bearer $(([string]$Token).Trim())"; Accept = 'application/json'; 'X-Modio-Platform' = 'windows' }
     if ($Method -eq 'Post') {
         return Invoke-RestMethod -Method Post -Uri "$($script:ModioBase)/$Path" -Headers $h -ContentType 'application/x-www-form-urlencoded' -Body '' -TimeoutSec 30
     }
@@ -437,7 +461,7 @@ function Install-AppUpdate($Info, [string]$Token) {
 function New-Engine($Manifest, $Config, $State, $UI) {
     return [pscustomobject]@{
         manifest = $Manifest; config = $Config; state = $State; ui = $UI
-        queue = @(); pos = 0; mode = 'idle'; current = $null; purpose = 'install'; modioNoted = $false
+        queue = @(); pos = 0; mode = 'idle'; current = $null; purpose = 'install'; modioNoted = $false; updates = @{}
         currentBatch = 0; workInBatch = 0; lastSource = ''
         waitStart = [datetime]::MinValue; reminded = $false; sleepUntil = [datetime]::MinValue
         installed = $null; subscribed = $null
@@ -659,6 +683,16 @@ function Step-Nexus($E, $item) {
         return
     }
     $ids = Get-InstalledNexusIds $E.config.gameDir
+    if ($ids.Contains($item.id) -and $E.updates -and $E.updates.ContainsKey([int]$item.id)) {
+        # work on a copy so the list entry itself stays an ordinary install item
+        $u = $E.updates[[int]$item.id]
+        $upd = $item.PSObject.Copy()
+        $upd | Add-Member -NotePropertyName minTs -NotePropertyValue ([long]$u.latestTs) -Force
+        $upd.kind = 'update'
+        $E.current = $upd
+        Open-NexusItem $E $upd (Get-NexusDownloadUrl $E.manifest.game $item.id $u.fileId) "Updating to v$($u.latest)"
+        return
+    }
     if ($ids.Contains($item.id)) {
         Set-ItemState $E $item 'Already installed' 'Found in Vortex' $true
         Complete-Item $E 'already'
@@ -716,9 +750,13 @@ function Step-Modio($E, $item) {
         $E.subscribed = Get-ModioSubscribed $gid $tok
     }
 
-    $results = Search-Modio $gid $item.query $tok
-    $sel = Select-ModioMatch $results $item.query $item.exclude
-    $mod = $sel.match
+    $mod = $null; $sel = [pscustomobject]@{ match = $null; choices = @() }
+    if ($item.modioId) { $mod = [pscustomobject]@{ id = [int]$item.modioId; name = $item.name } }
+    else {
+        $results = Search-Modio $gid $item.query $tok
+        $sel = Select-ModioMatch $results $item.query $item.exclude
+        $mod = $sel.match
+    }
     if (-not $mod -and $sel.choices.Count -gt 0) {
         # No prompt: take the most-downloaded match and record the choice.
         $mod = Select-MostPopular $sel.choices
@@ -772,14 +810,194 @@ function Get-InstallSnapshot($Manifest, [string]$GameDir, $ModioSubs) {
             if ($nexus.ContainsKey($it.id)) { $snap[$it.key] = [pscustomobject]@{ installed = $true; detail = "v$($nexus[$it.id].version) in Vortex" } }
             else { $snap[$it.key] = [pscustomobject]@{ installed = $false; detail = '' } }
         } elseif ($null -ne $ModioSubs) {
-            $sel = Select-ModioMatch $ModioSubs $it.query $it.exclude
-            $hit = $sel.match
-            if (-not $hit -and $sel.choices.Count -gt 0) { $hit = $sel.choices[0] }
+            if ($it.modioId) { $hit = @($ModioSubs | Where-Object { [int]$_.id -eq [int]$it.modioId }) | Select-Object -First 1 }
+            else {
+                $sel = Select-ModioMatch $ModioSubs $it.query $it.exclude
+                $hit = $sel.match
+            }
+            if (-not $hit -and -not $it.modioId -and $sel.choices.Count -gt 0) { $hit = $sel.choices[0] }
             if ($hit) { $snap[$it.key] = [pscustomobject]@{ installed = $true; detail = "Subscribed: $($hit.name)" } }
             else { $snap[$it.key] = [pscustomobject]@{ installed = $false; detail = '' } }
         }
     }
     return $snap
+}
+
+# ---------------------------------------------------------------- discovery
+# On start-up the app looks for more mods that work with the current game version and adds them
+# to the list as unticked "Discovered" groups, remembered in discovered.json between runs.
+#  - Nexus: mods whose latest file was uploaded after the patch (Nexus "updated" feed, plus the
+#    trending / latest lists), filtered for quality and for clashes with this setup. They are
+#    "verify" mods: the installer re-checks the post-patch file before installing.
+#  - mod.io: every mod in the official catalog, which CD PROJEKT RED approves for the current patch.
+
+$script:DiscoveryRules = @(
+    @{ re = '\bhud\b'; why = 'HUD mods clash with your custom HUD layout' },
+    @{ re = 'dismember'; why = 'Clashes with Relentless Live Dismember' },
+    @{ re = 'dual[ -]?wield|akimbo'; why = 'Overlaps Expanded Dual Wielding' },
+    @{ re = 'wardrobe'; why = 'Overlaps Equipment-EX' },
+    @{ re = 'flashlight'; why = 'You already have Simple Flashlight' },
+    @{ re = 'load game menu|save (game )?menu'; why = 'Overlaps Filter Saves by Lifepath and Type' },
+    @{ re = 'zoom(able)? scope|magnify'; why = 'You already have Zoomable Scopes' },
+    @{ re = '2\.31 and lower|\bfor (patch |game )?2\.(0|1|2|3)[0-9]?\b|\bpre[- ]?2\.5\b'; why = 'Made for an older game version' },
+    @{ re = 'unofficial (fix|patch|build)|community[- ]fix'; why = 'Unofficial framework build' },
+    @{ re = '\btrainer\b'; why = 'External trainer tool' },
+    @{ re = '\bamm\b|appearance menu mod|\bacu\b|appearance change unlocker'; why = 'Needs AMM or ACU, which have no 2.5 build yet' },
+    @{ re = 'reshade'; why = 'Needs ReShade installed outside Vortex' },
+    @{ re = '\bpreset\b'; why = 'Character preset (needs other tools)' },
+    @{ re = "translation|locali[sz]ation|language pack|traduc|bersetzung|\b(rus|chs|cht|ptbr|pt-br)\b|_(ru|cn|chs|cht|ptbr|br|es|fr|de|pl|jp|kr)\b|german|french|spanish|italian|polish|japanese|korean|chinese|russian|turkish|ukrainian|portuguese|brazilian|\bportugu"; why = 'Translation of another mod' },
+    @{ re = "modders? resource|\btemplate\b|tutorial|\bguide\b|\bwolvenkit\b"; why = 'Resource or guide for modders' }
+)
+
+function Get-DiscoveryBlockReason([string]$Name) {
+    foreach ($r in $script:DiscoveryRules) { if ($Name -imatch $r.re) { return $r.why } }
+    return $null
+}
+
+function Read-DiscoveryStore {
+    $d = Read-JsonFile (Join-Path $script:DataDir 'discovered.json')
+    $store = @{ nexus = @{}; modio = @{} }
+    if ($d) {
+        foreach ($k in 'nexus', 'modio') {
+            if ($d.PSObject.Properties[$k]) { foreach ($p in $d.$k.PSObject.Properties) { $store[$k][$p.Name] = $p.Value } }
+        }
+    }
+    return $store
+}
+function Save-DiscoveryStore($Store) { Write-JsonFile (Join-Path $script:DataDir 'discovered.json') $Store }
+
+function ConvertTo-NexusRecord($Obj, [long]$FileTs, [long]$PatchTs) {
+    $name = [string]$Obj.name
+    $why = $null
+    if (-not $Obj.available -or ([string]$Obj.status -and [string]$Obj.status -ne 'published')) { $why = 'Not available on Nexus' }
+    if (-not $why) { $why = Get-DiscoveryBlockReason $name }
+    $end = 0; try { $end = [int]$Obj.endorsement_count } catch {}
+    $dl = 0; try { $dl = [int]$Obj.mod_downloads } catch {}
+    if (-not $why -and $end -lt 10 -and $dl -lt 1000) { $why = 'Little-used so far (under 10 endorsements and 1,000 downloads)' }
+    $ts = if ($FileTs -gt 0) { $FileTs } else { [long]$Obj.updated_timestamp }
+    if (-not $why -and $ts -lt $PatchTs) { $why = 'No file since the patch' }
+    return [pscustomobject]@{ id = [int]$Obj.mod_id; name = $name; adult = [bool]$Obj.contains_adult_content; endorse = $end; downloads = $dl
+        ts = $ts; accepted = (-not $why); reason = [string]$why; checked = [long]([datetimeoffset][datetime]::UtcNow).ToUnixTimeSeconds() }
+}
+
+function New-Discovery($Manifest, $Config, $Store, $InstalledIds, $UI) {
+    return [pscustomobject]@{ manifest = $Manifest; config = $Config; store = $Store; installed = $InstalledIds; ui = $UI
+        phase = 'nexus-list'; queue = @(); pos = 0; budget = 60; done = $false; newKeys = (New-Object System.Collections.ArrayList)
+        patchTs = [long]([datetimeoffset]$Manifest.patchDate.ToUniversalTime()).ToUnixTimeSeconds() }
+}
+
+function Test-InManifest($Manifest, [string]$Key) { return [bool]($Manifest.items | Where-Object { $_.key -eq $Key } | Select-Object -First 1) }
+
+function Step-Discovery($D) {
+    if ($D.done) { return }
+    $game = $D.manifest.game
+    $now = [long]([datetimeoffset][datetime]::UtcNow).ToUnixTimeSeconds()
+    switch ($D.phase) {
+        'nexus-list' {
+            $D.phase = 'nexus-details'
+            if (-not $D.config.nexusKey) { $D.phase = 'modio'; return }
+            $key = $D.config.nexusKey
+            $cands = @{}
+            try {
+                foreach ($u in @(Invoke-Nexus "games/$game/mods/updated.json?period=1m" $key)) {
+                    if ([long]$u.latest_file_update -ge $D.patchTs) { $cands[[int]$u.mod_id] = [long]$u.latest_file_update }
+                }
+            } catch { $D.ui.Log('Discovery: Nexus update feed failed: ' + $_.Exception.Message) }
+            foreach ($feed in 'trending', 'latest_added', 'latest_updated') {
+                try {
+                    foreach ($o in @(Invoke-Nexus "games/$game/mods/$feed.json" $key)) {
+                        $id = [int]$o.mod_id
+                        if ($D.store.nexus.ContainsKey("$id") -or $D.installed.Contains($id) -or (Test-InManifest $D.manifest "nexus:$id")) { continue }
+                        $fts = if ($cands.ContainsKey($id)) { $cands[$id] } else { 0 }
+                        $D.store.nexus["$id"] = ConvertTo-NexusRecord $o $fts $D.patchTs
+                    }
+                } catch { $D.ui.Log("Discovery: Nexus $feed list failed: " + $_.Exception.Message) }
+            }
+            $todo = foreach ($id in ($cands.Keys | Sort-Object { $cands[$_] } -Descending)) {
+                if ($D.installed.Contains($id) -or (Test-InManifest $D.manifest "nexus:$id")) { continue }
+                $rec = $D.store.nexus["$id"]
+                # look again at mods rejected only for being little-used, once a week
+                if ($rec -and -not ($rec.reason -like 'Little-used*' -and ($now - [long]$rec.checked) -gt 604800)) { continue }
+                [pscustomobject]@{ id = $id; fts = $cands[$id] }
+            }
+            $D.queue = @($todo | Select-Object -First $D.budget)
+            $D.pos = 0
+            return
+        }
+        'nexus-details' {
+            if ($D.pos -ge $D.queue.Count) { $D.phase = 'modio'; return }
+            $c = $D.queue[$D.pos]; $D.pos++
+            try {
+                $o = Invoke-Nexus "games/$game/mods/$($c.id).json" $D.config.nexusKey
+                $D.store.nexus["$($c.id)"] = ConvertTo-NexusRecord $o $c.fts $D.patchTs
+            } catch {
+                $code = Get-HttpStatus $_
+                if ($code -eq 429) { $D.ui.Log('Discovery: Nexus rate limit reached; carrying on next time.'); $D.phase = 'modio' }
+                elseif ($code -in @(403, 404)) { $D.store.nexus["$($c.id)"] = [pscustomobject]@{ id = $c.id; name = ''; adult = $false; endorse = 0; downloads = 0; ts = $c.fts; accepted = $false; reason = 'Hidden or removed'; checked = $now } }
+            }
+            return
+        }
+        'modio' {
+            $D.phase = 'finish'
+            $tok = $D.config.modioToken
+            if (-not $tok) { return }
+            try {
+                if (-not $D.config.modioGameId) { $D.config.modioGameId = Resolve-ModioGameId $tok; Save-Config $D.config }
+                $gid = $D.config.modioGameId
+                $known = @($D.manifest.items | Where-Object { $_.source -eq 'modio' })
+                $offset = 0
+                while ($offset -lt 2000) {
+                    $r = Invoke-Modio Get "games/$gid/mods?_limit=100&_offset=$offset" $tok
+                    foreach ($m in @($r.data)) {
+                        $mid = [int]$m.id
+                        if ($D.store.modio.ContainsKey("$mid")) { continue }
+                        $listed = $false
+                        foreach ($k in $known) { if (-not $k.modioId -and (Select-ModioMatch @($m) $k.query $k.exclude).match) { $listed = $true; break } }
+                        $mature = $false; try { $mature = ([int]$m.maturity_option -gt 0) } catch {}
+                        $D.store.modio["$mid"] = [pscustomobject]@{ id = $mid; name = [string]$m.name; mature = $mature; accepted = (-not $listed); reason = $(if ($listed) { 'Already in the list' } else { '' }); checked = $now }
+                    }
+                    if (@($r.data).Count -lt 100) { break }
+                    $offset += 100
+                }
+            } catch { $D.ui.Log('Discovery: mod.io catalog failed: ' + $_.Exception.Message) }
+            return
+        }
+        'finish' {
+            Save-DiscoveryStore $D.store
+            foreach ($it in (Add-DiscoveredToManifest $D.manifest $D.store $D.installed)) { $null = $D.newKeys.Add($it.key) }
+            $D.done = $true
+            $D.ui.DiscoveryFinished(@($D.newKeys))
+            return
+        }
+    }
+}
+
+# Adds accepted discoveries that are not yet in the list. Returns the items it added.
+function Add-DiscoveredToManifest($Manifest, $Store, $InstalledIds) {
+    $defs = @{ 90 = @('Discovered on mod.io', 'modio'); 91 = @('Discovered on mod.io (mature)', 'modio'); 92 = @('Discovered on Nexus (new 2.5 files)', 'nexus'); 93 = @('Discovered on Nexus (adult 18+)', 'nexus') }
+    foreach ($b in $defs.Keys) { if (-not $Manifest.batches.ContainsKey($b)) { $Manifest.batches[$b] = [pscustomobject]@{ id = $b; name = $defs[$b][0]; source = $defs[$b][1] } } }
+    $added = New-Object System.Collections.ArrayList
+    $order = @($Manifest.items).Count
+    foreach ($rec in @($Store.modio.Values | Sort-Object { [string]$_.name })) {
+        if (-not $rec.accepted) { continue }
+        $key = "modio:id:$($rec.id)"
+        if (Test-InManifest $Manifest $key) { continue }
+        $it = [pscustomobject]@{ key = $key; kind = 'install'; order = $order++; batch = $(if ($rec.mature) { 91 } else { 90 }); source = 'modio'; name = [string]$rec.name
+            id = 0; query = [string]$rec.name; exclude = ''; optional = [bool]$rec.mature; verify = $false; note = 'Found in the official mod.io catalog (approved for this patch)'; modioId = [int]$rec.id; discovered = $true }
+        $null = $Manifest.items.Add($it); $null = $added.Add($it)
+    }
+    foreach ($rec in @($Store.nexus.Values | Sort-Object { [int]$_.endorse } -Descending)) {
+        if (-not $rec.accepted) { continue }
+        $id = [int]$rec.id
+        if ($InstalledIds -and $InstalledIds.Contains($id)) { continue }
+        $key = "nexus:$id"
+        if (Test-InManifest $Manifest $key) { continue }
+        $it = [pscustomobject]@{ key = $key; kind = 'install'; order = $order++; batch = $(if ($rec.adult) { 93 } else { 92 }); source = 'nexus'; name = [string]$rec.name
+            id = $id; query = ''; exclude = ''; optional = $true; verify = $true
+            note = "Found on Nexus: $($rec.endorse) endorsements. Check its page for extra requirements before ticking."; modioId = 0; discovered = $true }
+        $null = $Manifest.items.Add($it); $null = $added.Add($it)
+    }
+    return $added
 }
 
 function Get-PreflightWarnings($Config) {
@@ -810,6 +1028,9 @@ function Start-App {
     $manifest = Load-Manifest
     $config = Load-Config
     $state = Load-State
+    $startIds = $null
+    if ($config.gameDir -and (Test-Path -LiteralPath $config.gameDir)) { $startIds = Get-InstalledNexusIds $config.gameDir }
+    $null = Add-DiscoveredToManifest $manifest (Read-DiscoveryStore) $startIds
 
     $font = New-Object Drawing.Font('Segoe UI', 9.5)
     $bold = New-Object Drawing.Font('Segoe UI Semibold', 10.5)
@@ -854,13 +1075,19 @@ function Start-App {
     $list.View = 'Details'; $list.CheckBoxes = $true; $list.FullRowSelect = $true; $list.Dock = 'Fill'; $list.HideSelection = $false
     [void]$list.Columns.Add('Mod', 330); [void]$list.Columns.Add('Source', 70); [void]$list.Columns.Add('Status', 150); [void]$list.Columns.Add('Detail', 470)
     $rows = @{}
-    $gi = 0
-    foreach ($bid in @($manifest.items | ForEach-Object { $_.batch } | Select-Object -Unique)) {
-        $gi++; $b = $manifest.batches[$bid]
+    $locked = New-Object 'System.Collections.Generic.HashSet[string]'
+    $updatesById = @{}
+    $groupCount = @{ n = 0 }
+    $ensureGroup = {
+        param([int]$bid)
+        if ($list.Groups["b$bid"]) { return }
+        $groupCount.n++; $b = $manifest.batches[$bid]
         $src = if ($b.source -eq 'modio') { 'mod.io' } else { 'Nexus' }
-        [void]$list.Groups.Add((New-Object Windows.Forms.ListViewGroup("b$bid", "$gi. $($b.name)   [$src]")))
+        [void]$list.Groups.Add((New-Object Windows.Forms.ListViewGroup("b$bid", "$($groupCount.n). $($b.name)   [$src]")))
     }
-    foreach ($it in $manifest.items) {
+    $addRow = {
+        param($it)
+        & $ensureGroup $it.batch
         $row = New-Object Windows.Forms.ListViewItem($it.name)
         [void]$row.SubItems.Add($(if ($it.source -eq 'nexus') { 'Nexus' } else { 'mod.io' }))
         $st = ''; $dt = ''; $done = $false
@@ -873,6 +1100,7 @@ function Start-App {
         [void]$list.Items.Add($row)
         $rows[$it.key] = @{ row = $row; statusCol = 2; detailCol = 3 }
     }
+    foreach ($it in $manifest.items) { & $addRow $it }
     $bottom = New-Object Windows.Forms.FlowLayoutPanel
     $bottom.Dock = 'Bottom'; $bottom.Height = 44; $bottom.Padding = New-Object Windows.Forms.Padding(4, 6, 4, 6)
     $btnStart = New-Object Windows.Forms.Button; $btnStart.Text = 'Start'; $btnStart.Width = 110; $btnStart.Height = 30; $btnStart.Font = $bold
@@ -886,7 +1114,7 @@ function Start-App {
     $summary = New-Object Windows.Forms.Panel; $summary.Dock = 'Top'; $summary.Height = 58; $summary.Padding = New-Object Windows.Forms.Padding(8, 6, 8, 4)
     $sumText = New-Object Windows.Forms.Label; $sumText.Dock = 'Top'; $sumText.Height = 26; $sumText.Font = New-Object Drawing.Font('Segoe UI Semibold', 12)
     $sumLegend = New-Object Windows.Forms.Label; $sumLegend.Dock = 'Top'; $sumLegend.Height = 22; $sumLegend.ForeColor = [Drawing.Color]::DimGray
-    $sumLegend.Text = "Green rows with $($script:Glyph.ok) are already installed and need nothing.  Yellow rows are waiting for a 2.5 file or a key.  White rows will be installed."
+    $sumLegend.Text = "Green rows with $($script:Glyph.ok) are installed and locked (nothing to do).  Orange rows with $($script:Glyph.up) have an update and can be ticked.  Yellow rows are waiting.  White rows will be installed."
     $summary.Controls.Add($sumLegend); $summary.Controls.Add($sumText)
     $btnRefresh = New-Object Windows.Forms.Button; $btnRefresh.Text = 'Refresh installed'; $btnRefresh.Width = 130; $btnRefresh.Height = 30
     $bottom.Controls.Add($btnRefresh); $bottom.Controls.SetChildIndex($btnRefresh, 5)
@@ -908,7 +1136,9 @@ function Start-App {
     $btnAppUpd = New-Object Windows.Forms.Button; $btnAppUpd.Text = 'Update app'; $btnAppUpd.AutoSize = $true; $btnAppUpd.Height = 30; $btnAppUpd.Visible = $false
     $chkAuto = New-Object Windows.Forms.CheckBox; $chkAuto.Text = 'Check for updates when the app opens'; $chkAuto.AutoSize = $true
     $chkAuto.Margin = New-Object Windows.Forms.Padding(16, 8, 0, 0); $chkAuto.Checked = [bool]$config.checkOnStart
-    $updBottom.Controls.AddRange(@($btnCheck, $btnUpdate, $btnAppUpd, $chkAuto))
+    $chkDisc = New-Object Windows.Forms.CheckBox; $chkDisc.Text = 'Look for new compatible mods when the app opens'; $chkDisc.AutoSize = $true
+    $chkDisc.Margin = New-Object Windows.Forms.Padding(16, 8, 0, 0); $chkDisc.Checked = [bool]$config.discoverOnStart
+    $updBottom.Controls.AddRange(@($btnCheck, $btnUpdate, $btnAppUpd, $chkAuto, $chkDisc))
     $tabUpdates.Controls.Add($updList); $tabUpdates.Controls.Add($updHeader); $tabUpdates.Controls.Add($updBottom)
 
     # ---- log
@@ -918,7 +1148,7 @@ function Start-App {
 
     $form.Controls.Add($tabs); $form.Controls.Add($banner); $form.Controls.Add($top); $form.Controls.Add($log)
 
-    $engineRef = @{ E = $null; C = $null; AppUpdate = $null }
+    $engineRef = @{ E = $null; C = $null; D = $null; AppUpdate = $null }
 
     $looks = @{
         ok     = @{ back = [Drawing.Color]::FromArgb(222, 244, 226); fore = [Drawing.Color]::FromArgb(22, 101, 52) }
@@ -978,7 +1208,13 @@ function Start-App {
         if ($entry.detailCol -ge 0) { $r.SubItems[$entry.detailCol].Text = $detail }
         $k = & $lookFor $status
         & $setLook $r $k
-        if ($k -eq 'ok') { $r.Checked = $false }
+        if ($k -eq 'ok') {
+            $r.Checked = $false
+            if ($entry.statusCol -eq 2) {
+                [void]$locked.Add([string]$key)
+                if ($key -like 'nexus:*') { $updatesById.Remove([int]($key -replace '^nexus:', '')) }
+            }
+        }
         $r.EnsureVisible()
         if ($entry.statusCol -eq 2) { & $updateSummary }
     }
@@ -1018,6 +1254,19 @@ function Start-App {
     }
     $ui | Add-Member ScriptMethod CheckFinished {
         param($n)
+        $updatesById.Clear()
+        foreach ($res in @($engineRef.C.results | Where-Object { $_.update -and $_.source -eq 'Nexus' })) { $updatesById[[int]$res.id] = $res }
+        $unlocked = 0
+        foreach ($id in @($updatesById.Keys)) {
+            $entry = $rows["nexus:$id"]
+            if ($entry) {
+                $u = $updatesById[$id]; $r = $entry.row
+                [void]$locked.Remove("nexus:$id")
+                $r.SubItems[2].Text = (& $decorate 'Update available'); $r.SubItems[3].Text = "v$($u.installed) -> v$($u.latest)"
+                & $setLook $r 'update'; $r.Checked = $true; $unlocked++
+            }
+        }
+        if ($unlocked -gt 0) { & $updateSummary }
         $btnCheck.Enabled = $true
         $btnUpdate.Enabled = ($n -gt 0)
         Update-UpdHeader
@@ -1027,6 +1276,22 @@ function Start-App {
                 $ui.Banner("$n of your Nexus mods have updates. Open the Updates tab and click 'Update ticked'. Frameworks go first.", @())
             }
         } else { $ui.Log('Update check: everything is up to date.') }
+    }
+
+    $ui | Add-Member ScriptMethod DiscoveryFinished {
+        param($keys)
+        $added = 0
+        foreach ($k in @($keys)) {
+            if ($rows.ContainsKey($k)) { continue }
+            $it = $manifest.items | Where-Object { $_.key -eq $k } | Select-Object -First 1
+            if ($it) { & $addRow $it; $added++ }
+        }
+        & $updateSummary
+        $nx = @($keys | Where-Object { $_ -like 'nexus:*' }).Count; $mo = $added - $nx
+        if ($added -gt 0) {
+            $ui.Log("Discovery: added $added new mods for this game version ($mo from mod.io, ticked; $nx from Nexus, unticked).")
+            if (-not (Test-EngineBusy)) { $ui.Banner("Found $added more mods that work with this game version. They're at the bottom of the list under 'Discovered'. mod.io finds are ticked; Nexus finds are unticked, so check their pages for requirements before ticking.", @()) }
+        } else { $ui.Log('Discovery: no new compatible mods since last time.') }
     }
 
     $refreshInstalled = {
@@ -1048,11 +1313,20 @@ function Start-App {
                 continue
             }
             $s = $snap[$it.key]
-            if ($s.installed) {
+            if ($s.installed -and $it.source -eq 'nexus' -and $updatesById.ContainsKey([int]$it.id)) {
                 $n++
-                $r.SubItems[2].Text = (& $decorate $(if ($it.source -eq 'nexus') { 'Installed' } else { 'Subscribed' })); $r.SubItems[3].Text = $s.detail
+                $u = $updatesById[[int]$it.id]
+                [void]$locked.Remove($it.key)
+                $r.SubItems[2].Text = (& $decorate 'Update available'); $r.SubItems[3].Text = "$($s.detail) -> v$($u.latest)"
+                & $setLook $r 'update'; $r.Checked = $true
+            } elseif ($s.installed) {
+                $n++
+                $r.SubItems[2].Text = (& $decorate $(if ($it.source -eq 'nexus') { 'Installed' } else { 'Subscribed' }))
+                $r.SubItems[3].Text = $s.detail + $(if ($it.source -eq 'nexus') { '  (locked: no update)' } else { '  (locked: the game keeps it updated)' })
                 & $setLook $r 'ok'; $r.Checked = $false
+                [void]$locked.Add($it.key)
             } else {
+                [void]$locked.Remove($it.key)
                 $saved = if ($state.ContainsKey($it.key)) { $state[$it.key].status } else { '' }
                 if ((& $lookFor $saved) -eq 'ok') {
                     # was installed earlier but is gone now (removed in Vortex or unsubscribed)
@@ -1127,6 +1401,7 @@ function Start-App {
     # ---- events
     $chkPause.Add_CheckedChanged({ $config.pauseBetweenBatches = $chkPause.Checked; Save-Config $config })
     $chkAuto.Add_CheckedChanged({ $config.checkOnStart = $chkAuto.Checked; Save-Config $config })
+    $chkDisc.Add_CheckedChanged({ $config.discoverOnStart = $chkDisc.Checked; Save-Config $config })
 
     $btnBrowse.Add_Click({
         $fb = New-Object Windows.Forms.FolderBrowserDialog
@@ -1148,8 +1423,11 @@ function Start-App {
         }
         $l1 = & $mk 'Nexus personal API key (optional; needed to check Nexus mods for updates). Get it at next.nexusmods.com/settings/api-keys, under "Personal API Key".' 'next.nexusmods.com/settings/api-keys' 'https://next.nexusmods.com/settings/api-keys'
         $k1 = New-Object Windows.Forms.TextBox; $k1.UseSystemPasswordChar = $true; $k1.Width = 610; $k1.Text = $config.nexusKey
-        $l2 = & $mk 'mod.io access token. Sign in with the same account you linked in the game, open mod.io/me/access, create an OAuth 2 client, then a token with Read and Write access.' 'mod.io/me/access' 'https://mod.io/me/access'
+        $l2 = & $mk 'mod.io token: a Personal Access Token (preferred) or an older OAuth 2 access token, with read and write access. Sign in at mod.io/me/access with the SAME account you linked in the game and create it there.' 'mod.io/me/access' 'https://mod.io/me/access'
         $k2 = New-Object Windows.Forms.TextBox; $k2.UseSystemPasswordChar = $true; $k2.Width = 610; $k2.Text = $config.modioToken
+        $l4 = New-Object Windows.Forms.Label; $l4.AutoSize = $true; $l4.MaximumSize = New-Object Drawing.Size(610, 0)
+        $l4.Text = 'mod.io API path (optional). Leave empty unless mod.io/me/access shows a personal API path such as https://u-12345.modapi.io/v1.'
+        $k4 = New-Object Windows.Forms.TextBox; $k4.Width = 610; $k4.Text = $config.modioApiPath
         $l3 = & $mk 'GitHub token (optional). App updates come from the public repo github.com/Sirtacoburrito/NightCityInstaller and need no token. Only fill this in if that repo is ever made private.' 'github.com/Sirtacoburrito/NightCityInstaller' 'https://github.com/Sirtacoburrito/NightCityInstaller'
         $k3 = New-Object Windows.Forms.TextBox; $k3.UseSystemPasswordChar = $true; $k3.Width = 610; $k3.Text = $config.githubToken
         $res = New-Object Windows.Forms.Label; $res.AutoSize = $true; $res.MaximumSize = New-Object Drawing.Size(610, 0); $res.ForeColor = [Drawing.Color]::DimGray
@@ -1157,7 +1435,8 @@ function Start-App {
         $test = New-Object Windows.Forms.Button; $test.Text = 'Test'; $test.AutoSize = $true
         $save = New-Object Windows.Forms.Button; $save.Text = 'Save'; $save.AutoSize = $true; $save.DialogResult = 'OK'
         $p.Controls.AddRange(@($test, $save))
-        $t.Controls.AddRange(@($l1, $k1, $l2, $k2, $l3, $k3, $p, $res)); $dlg.Controls.Add($t)
+        $t.Controls.AddRange(@($l1, $k1, $l2, $k2, $l4, $k4, $l3, $k3, $p, $res)); $dlg.Controls.Add($t)
+        $dlg.Size = New-Object Drawing.Size(660, 600)
         $test.Add_Click({
             $out = @()
             if ($k1.Text.Trim()) {
@@ -1165,8 +1444,17 @@ function Start-App {
                 catch { $out += 'Nexus: key rejected (' + $_.Exception.Message + ')' }
             }
             if ($k2.Text.Trim()) {
-                try { $me = Invoke-Modio Get 'me' $k2.Text.Trim(); $out += "mod.io: signed in as $($me.username)" }
-                catch { $out += 'mod.io: token rejected (' + $_.Exception.Message + ')' }
+                Set-ModioBase $k4.Text
+                $kind = Get-ModioTokenKind $k2.Text
+                try {
+                    $me = Invoke-Modio Get 'me' $k2.Text.Trim()
+                    $out += "mod.io: signed in as $($me.username). Make sure this is the account linked in the game."
+                    if ($kind -eq 'oauth2') { $out += 'mod.io: this is an OAuth 2 token, which mod.io is phasing out. When you can, create a Personal Access Token on mod.io/me/access and paste it here instead.' }
+                } catch {
+                    $code = Get-HttpStatus $_
+                    $out += if ($code -eq 401) { 'mod.io: token rejected. It may have expired or been revoked; create a new Personal Access Token on mod.io/me/access.' } else { 'mod.io: could not connect (' + $_.Exception.Message + '). If mod.io/me/access shows an API path, paste it in the field above.' }
+                }
+                Set-ModioBase $config.modioApiPath
             }
             try {
                 $info = Test-AppUpdate $k3.Text.Trim()
@@ -1175,7 +1463,8 @@ function Start-App {
             $res.Text = ($out -join [Environment]::NewLine)
         })
         if ($dlg.ShowDialog($form) -eq 'OK') {
-            $config.nexusKey = $k1.Text.Trim(); $config.modioToken = $k2.Text.Trim(); $config.githubToken = $k3.Text.Trim()
+            $config.nexusKey = $k1.Text.Trim(); $config.modioToken = $k2.Text.Trim(); $config.githubToken = $k3.Text.Trim(); $config.modioApiPath = $k4.Text.Trim()
+            if ((Get-ModioTokenKind $config.modioToken) -eq 'oauth2') { $ui.Log('mod.io: you are using an OAuth 2 token. It works for now, but mod.io is moving to Personal Access Tokens; swap it when you can.') }
             if ($engineRef.E) { $engineRef.E.subscribed = $null }
             Save-Config $config; Update-AccountLabel
             $ui.Log('Accounts saved.')
@@ -1186,6 +1475,11 @@ function Start-App {
     $btnAll.Add_Click({ foreach ($r in $list.Items) { if ((& $lookFor ($r.SubItems[2].Text -replace '^[^A-Za-z]+', '')) -ne 'ok') { $r.Checked = $true } }; & $updateSummary })
     $btnNone.Add_Click({ foreach ($r in $list.Items) { $r.Checked = $false }; & $updateSummary })
     $list.Add_ItemChecked({ if ($sumText) { & $updateSummary } })
+    $list.Add_ItemCheck({
+        param($s, $e)
+        $k = [string]$list.Items[$e.Index].Tag
+        if ($e.NewValue -eq [Windows.Forms.CheckState]::Checked -and $locked.Contains($k)) { $e.NewValue = [Windows.Forms.CheckState]::Unchecked }
+    })
     $btnReset.Add_Click({
         $a = [Windows.Forms.MessageBox]::Show('Clear all saved install progress? Mods already installed stay installed and are detected again.', $script:AppName, 'YesNo', 'Question')
         if ($a -eq 'Yes') {
@@ -1213,6 +1507,24 @@ function Start-App {
         finally { $script:Busy = $false }
     })
 
+    $discTimer = New-Object Windows.Forms.Timer
+    $discTimer.Interval = 300
+    $script:DiscBusy = $false
+    $discTimer.Add_Tick({
+        if ($script:DiscBusy -or -not $engineRef.D) { return }
+        $script:DiscBusy = $true
+        try { Step-Discovery $engineRef.D; if ($engineRef.D.done) { $discTimer.Stop() } }
+        catch { $ui.Log('Discovery error: ' + $_.Exception.Message); $discTimer.Stop() }
+        finally { $script:DiscBusy = $false }
+    })
+    $startDiscovery = {
+        if (-not $config.gameDir -or -not (Test-Path -LiteralPath $config.gameDir)) { return }
+        if (-not $config.nexusKey -and -not $config.modioToken) { $ui.Log('Discovery skipped: add a Nexus key or mod.io token under Accounts.'); return }
+        $engineRef.D = New-Discovery $manifest $config (Read-DiscoveryStore) (Get-InstalledNexusIds $config.gameDir) $ui
+        $ui.Log('Looking for more mods that work with this game version...')
+        $discTimer.Start()
+    }
+
     $chkTimer = New-Object Windows.Forms.Timer
     $chkTimer.Interval = 250
     $script:CheckBusy = $false
@@ -1232,6 +1544,7 @@ function Start-App {
             $engineRef.E.mode = 'running'; $engineRef.E.current = $null
         } else {
             $engineRef.E = New-Engine $manifest $config $state $ui
+            $engineRef.E.updates = $updatesById
             Start-Engine $engineRef.E $checked
         }
         if ($engineRef.E.mode -eq 'done') { return }
@@ -1275,10 +1588,10 @@ function Start-App {
             $ui.Log("Game version changed: $prev -> $gv")
         }
         if ($gv) { $state['__gameVersion'] = @{ status = ''; detail = $gv; done = $false }; Save-State $state }
-        $form.Add_Shown({ & $refreshInstalled; if ($config.checkOnStart) { & $startCheck } })
+        $form.Add_Shown({ & $refreshInstalled; if ($config.checkOnStart) { & $startCheck }; if ($config.discoverOnStart) { & $startDiscovery } })
     }
     [void]$form.ShowDialog()
-    $timer.Stop(); $chkTimer.Stop()
+    $timer.Stop(); $chkTimer.Stop(); $discTimer.Stop()
 }
 
 if (-not $TestMode) {
