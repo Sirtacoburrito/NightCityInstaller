@@ -90,6 +90,7 @@ function Invoke-RestMethod {
         return [pscustomobject]@{ files = @([pscustomobject]@{ file_id = $id * 10; version='9.9'; category_name='MAIN'; is_primary=$true; uploaded_timestamp=(U '2026-10-25') }) }
     }
     if ($u -like 'https://api.mod.io/v1/games?name_id=*') { return [pscustomobject]@{ data = @([pscustomobject]@{ id = 5555; name = 'Cyberpunk 2077' }) } }
+    if ($u -eq 'https://api.mod.io/v1/me') { return [pscustomobject]@{ username = 'tester' } }
     if ($u -like 'https://api.mod.io/v1/me/subscribed*') { return [pscustomobject]@{ data = @([pscustomobject]@{ id = 104 }) } }
     if ($u -match 'games/5555/mods\?_q=([^&]+)') {
         $q = [Uri]::UnescapeDataString($Matches[1])
@@ -148,7 +149,7 @@ Check 'state persisted' ((Load-State).Count -eq 9)
 # resume: second run only queues what isn't done
 $E2 = New-Engine $manifest $cfg (Load-State) $ui
 Start-Engine $E2 $keys
-Check 'resume re-queues unfinished (Zoomable waiting + Hot Fuzz)' (($E2.queue | % key) -join ',' -eq 'nexus:3543,modio:Hot Fuzz') (($E2.queue | % key) -join ',')
+Check 'resume re-queues unfinished (Zoomable waiting + Hot Fuzz)' (($E2.queue | % key) -join ',' -eq 'modio:Hot Fuzz,nexus:3543') (($E2.queue | % key) -join ',')
 
 # checkpoints when enabled
 Remove-Item (Join-Path $script:DataDir 'state.json')
@@ -181,10 +182,9 @@ $opened.Clear()
 $E5 = New-Engine $manifest $cfg5 @{} $ui
 Start-Engine $E5 @('nexus:17642', 'modio:Encore')
 Step-Engine $E5
-Check 'no key -> files tab' ($opened[0] -eq 'https://www.nexusmods.com/cyberpunk2077/mods/17642?tab=files')
-Invoke-EngineAction $E5 "It's installed"
+Check 'no token -> mod.io item held, not done' ($E5.state['modio:Encore'].status -eq 'Needs mod.io token' -and -not $E5.state['modio:Encore'].done)
 Step-Engine $E5
-Check 'no token -> pauses with message' ($E5.mode -eq 'paused')
+Check 'no token does not block Nexus; no key -> files tab' ($opened[0] -eq 'https://www.nexusmods.com/cyberpunk2077/mods/17642?tab=files')
 
 # verify-tier mod without a Nexus key is held back, not installed blind
 $opened.Clear()
@@ -275,6 +275,7 @@ function Invoke-RestMethod {
         return [pscustomobject]@{ files = @([pscustomobject]@{ file_id = 1; version = $m.version; category_name = 'MAIN'; uploaded_timestamp = $m.ts; file_name = 'x' }) }
     }
     if ($u -like '*games?name_id=*') { return [pscustomobject]@{ data = @([pscustomobject]@{ id = 5555 }) } }
+    if ($u -like '*/v1/me') { return [pscustomobject]@{ username = 'tester' } }
     if ($u -like '*me/subscribed*') {
         return [pscustomobject]@{ data = @([pscustomobject]@{ id = 101; name = 'Deceptious Quest Core'; date_updated = (1000 * $script:Mo); modfile = [pscustomobject]@{ version = "3.3.$($script:Mo)" } }) }
     }

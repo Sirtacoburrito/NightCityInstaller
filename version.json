@@ -1,14 +1,14 @@
 {
-  "version": "1.2.0",
-  "notes": "113 mods: 53 new Nexus mods for 2.5 (fixes, cyberware, vehicles, homes, weapons, optional overhauls, romance and adult groups). Installed mods are now shown in green with a check mark, with a summary bar. Mods without a 2.5 file wait and install automatically once updated.",
+  "version": "1.2.1",
+  "notes": "mod.io mods now install first (no clicks needed), so they no longer wait behind the Nexus downloads. A missing mod.io token no longer stops the Nexus part. The log shows which mod.io account is used.",
   "files": [
     {
       "path": "NightCityInstaller.ps1",
-      "sha256": "45A186F1F008A298BB72AC7F8D380EFF22C06D0B4E336529892EFD587DCB2311"
+      "sha256": "A1AFE84DC28F5496F74B35ED17D84AD3034127BFA8502EAC0D348FD7E81022BF"
     },
     {
       "path": "manifest.json",
-      "sha256": "A307A1920BC7E2854890494FD2D4B088A00E1277447FBB8DF2AAA2F51EF9F775"
+      "sha256": "3494B0B69E936D79B3882C0E08A666AFB1C6DD7D75CDC11E3EBF65371F77FDE1"
     },
     {
       "path": "README.txt",

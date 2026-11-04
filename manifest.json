@@ -135,6 +135,265 @@
   ],
   "mods": [
     {
+      "batch": 11,
+      "source": "modio",
+      "query": "Deceptious Quest Core",
+      "name": "Deceptious Quest Core"
+    },
+    {
+      "batch": 11,
+      "source": "modio",
+      "query": "Deceptious Bug Fixes",
+      "name": "Deceptious Bug Fixes [DQC]"
+    },
+    {
+      "batch": 12,
+      "source": "modio",
+      "query": "One More Light",
+      "name": "New Quest - One More Light [DQC]"
+    },
+    {
+      "batch": 12,
+      "source": "modio",
+      "query": "Hot Fuzz",
+      "name": "New Quest - Hot Fuzz [DQC]"
+    },
+    {
+      "batch": 12,
+      "source": "modio",
+      "query": "Encore",
+      "name": "New Quest - Encore [DQC]"
+    },
+    {
+      "batch": 12,
+      "source": "modio",
+      "query": "Night City Interactions",
+      "name": "Night City Interactions"
+    },
+    {
+      "batch": 13,
+      "source": "modio",
+      "query": "Immersive Rippers",
+      "name": "Immersive Rippers"
+    },
+    {
+      "batch": 13,
+      "source": "modio",
+      "query": "Immersive Rippers Dogtown",
+      "name": "Immersive Rippers - Dogtown"
+    },
+    {
+      "batch": 13,
+      "source": "modio",
+      "query": "Idle Anywhere",
+      "name": "Idle Anywhere [DQC]"
+    },
+    {
+      "batch": 13,
+      "source": "modio",
+      "query": "TV Anywhere",
+      "name": "TV Anywhere [DQC]"
+    },
+    {
+      "batch": 13,
+      "source": "modio",
+      "query": "Computer Anywhere",
+      "name": "Computer Anywhere [DQC]"
+    },
+    {
+      "batch": 13,
+      "source": "modio",
+      "query": "Scannable Stash",
+      "name": "Scannable Stash [DQC]"
+    },
+    {
+      "batch": 13,
+      "source": "modio",
+      "query": "Weeee",
+      "name": "Weeee (New H10 Exit) [DQC]"
+    },
+    {
+      "batch": 13,
+      "source": "modio",
+      "query": "Apartment Birds",
+      "name": "Apartment Birds [DQC]"
+    },
+    {
+      "batch": 13,
+      "source": "modio",
+      "query": "Interactive Judy's Apartment Devices",
+      "name": "QoL - Interactive Judy's Apartment Devices"
+    },
+    {
+      "batch": 13,
+      "source": "modio",
+      "query": "Here's Brendan",
+      "name": "Here's Brendan"
+    },
+    {
+      "batch": 13,
+      "source": "modio",
+      "query": "Roller Coaster Enhanced",
+      "name": "Roller Coaster Enhanced"
+    },
+    {
+      "batch": 13,
+      "source": "modio",
+      "query": "Orbital Air Traffic Enhanced",
+      "name": "Orbital Air Traffic Enhanced"
+    },
+    {
+      "batch": 14,
+      "source": "modio",
+      "query": "Borg Malorian Restored",
+      "name": "Borg Malorian Restored"
+    },
+    {
+      "batch": 14,
+      "source": "modio",
+      "query": "Body Shield",
+      "name": "Body Shield"
+    },
+    {
+      "batch": 14,
+      "source": "modio",
+      "query": "Buttslinger Quickmelee",
+      "name": "Buttslinger Quickmelee"
+    },
+    {
+      "batch": 14,
+      "source": "modio",
+      "query": "Challenging Breach Minigame",
+      "name": "Challenging Breach Minigame",
+      "exclude": "0.5x"
+    },
+    {
+      "batch": 14,
+      "source": "modio",
+      "query": "Quickhack Loadouts",
+      "name": "Quickhack Loadouts"
+    },
+    {
+      "batch": 14,
+      "source": "modio",
+      "query": "Clear Skill Checks",
+      "name": "Clear Skill Checks"
+    },
+    {
+      "batch": 14,
+      "source": "modio",
+      "query": "Better Armor Tooltip",
+      "name": "Better Armor Tooltip"
+    },
+    {
+      "batch": 14,
+      "source": "modio",
+      "query": "Fluff Vendor Fixes",
+      "name": "Fluff Vendor Fixes"
+    },
+    {
+      "batch": 14,
+      "source": "modio",
+      "query": "Longer Car Delivery Timers",
+      "name": "Longer Car Delivery Timers"
+    },
+    {
+      "batch": 14,
+      "source": "modio",
+      "query": "Faster Checkpoints",
+      "name": "QoL - Faster Checkpoints"
+    },
+    {
+      "batch": 14,
+      "source": "modio",
+      "query": "Easier Sprint Activation",
+      "name": "Easier Sprint Activation"
+    },
+    {
+      "batch": 15,
+      "source": "modio",
+      "optional": true,
+      "query": "Natural Eye Colours",
+      "name": "Natural Eye Colours"
+    },
+    {
+      "batch": 15,
+      "source": "modio",
+      "optional": true,
+      "query": "E3 Cyberware",
+      "name": "E3 - Cyberware 01"
+    },
+    {
+      "batch": 15,
+      "source": "modio",
+      "optional": true,
+      "query": "E3 Complexion",
+      "name": "E3 Complexion (with make-up)"
+    },
+    {
+      "batch": 15,
+      "source": "modio",
+      "optional": true,
+      "query": "Christy Ponytail Hair",
+      "name": "HoV - Christy Ponytail Hair FEM V"
+    },
+    {
+      "batch": 15,
+      "source": "modio",
+      "optional": true,
+      "query": "Christy Buns Hair",
+      "name": "HoV - Christy Buns Hair FEM V"
+    },
+    {
+      "batch": 15,
+      "source": "modio",
+      "optional": true,
+      "query": "Christy Crown Hair",
+      "name": "HoV - Christy Crown Hair FEM V"
+    },
+    {
+      "batch": 15,
+      "source": "modio",
+      "optional": true,
+      "query": "Neo-Princess Hair",
+      "name": "HoV - Neo-Princess Hair FEM V"
+    },
+    {
+      "batch": 15,
+      "source": "modio",
+      "optional": true,
+      "query": "Neo-P Glam",
+      "name": "HoV - Neo-P Glam ver Hair FEM V"
+    },
+    {
+      "batch": 15,
+      "source": "modio",
+      "optional": true,
+      "query": "Anime Pigtails Hair",
+      "name": "HoV - Anime Pigtails Hair"
+    },
+    {
+      "batch": 15,
+      "source": "modio",
+      "optional": true,
+      "query": "Actually Black Hair Color",
+      "name": "HoV - Actually Black Hair Color"
+    },
+    {
+      "batch": 15,
+      "source": "modio",
+      "optional": true,
+      "query": "Actually Platinum Blond",
+      "name": "HoV - Actually Platinum Blond (pick one)"
+    },
+    {
+      "batch": 15,
+      "source": "modio",
+      "optional": true,
+      "query": "Vesnace Lips",
+      "name": "HoV - Vesnace lip colors"
+    },
+    {
       "batch": 1,
       "source": "nexus",
       "id": 4575,
@@ -614,265 +873,6 @@
       "id": 210,
       "name": "Better Vehicle Handling",
       "verify": true
-    },
-    {
-      "batch": 11,
-      "source": "modio",
-      "query": "Deceptious Quest Core",
-      "name": "Deceptious Quest Core"
-    },
-    {
-      "batch": 11,
-      "source": "modio",
-      "query": "Deceptious Bug Fixes",
-      "name": "Deceptious Bug Fixes [DQC]"
-    },
-    {
-      "batch": 12,
-      "source": "modio",
-      "query": "One More Light",
-      "name": "New Quest - One More Light [DQC]"
-    },
-    {
-      "batch": 12,
-      "source": "modio",
-      "query": "Hot Fuzz",
-      "name": "New Quest - Hot Fuzz [DQC]"
-    },
-    {
-      "batch": 12,
-      "source": "modio",
-      "query": "Encore",
-      "name": "New Quest - Encore [DQC]"
-    },
-    {
-      "batch": 12,
-      "source": "modio",
-      "query": "Night City Interactions",
-      "name": "Night City Interactions"
-    },
-    {
-      "batch": 13,
-      "source": "modio",
-      "query": "Immersive Rippers",
-      "name": "Immersive Rippers"
-    },
-    {
-      "batch": 13,
-      "source": "modio",
-      "query": "Immersive Rippers Dogtown",
-      "name": "Immersive Rippers - Dogtown"
-    },
-    {
-      "batch": 13,
-      "source": "modio",
-      "query": "Idle Anywhere",
-      "name": "Idle Anywhere [DQC]"
-    },
-    {
-      "batch": 13,
-      "source": "modio",
-      "query": "TV Anywhere",
-      "name": "TV Anywhere [DQC]"
-    },
-    {
-      "batch": 13,
-      "source": "modio",
-      "query": "Computer Anywhere",
-      "name": "Computer Anywhere [DQC]"
-    },
-    {
-      "batch": 13,
-      "source": "modio",
-      "query": "Scannable Stash",
-      "name": "Scannable Stash [DQC]"
-    },
-    {
-      "batch": 13,
-      "source": "modio",
-      "query": "Weeee",
-      "name": "Weeee (New H10 Exit) [DQC]"
-    },
-    {
-      "batch": 13,
-      "source": "modio",
-      "query": "Apartment Birds",
-      "name": "Apartment Birds [DQC]"
-    },
-    {
-      "batch": 13,
-      "source": "modio",
-      "query": "Interactive Judy's Apartment Devices",
-      "name": "QoL - Interactive Judy's Apartment Devices"
-    },
-    {
-      "batch": 13,
-      "source": "modio",
-      "query": "Here's Brendan",
-      "name": "Here's Brendan"
-    },
-    {
-      "batch": 13,
-      "source": "modio",
-      "query": "Roller Coaster Enhanced",
-      "name": "Roller Coaster Enhanced"
-    },
-    {
-      "batch": 13,
-      "source": "modio",
-      "query": "Orbital Air Traffic Enhanced",
-      "name": "Orbital Air Traffic Enhanced"
-    },
-    {
-      "batch": 14,
-      "source": "modio",
-      "query": "Borg Malorian Restored",
-      "name": "Borg Malorian Restored"
-    },
-    {
-      "batch": 14,
-      "source": "modio",
-      "query": "Body Shield",
-      "name": "Body Shield"
-    },
-    {
-      "batch": 14,
-      "source": "modio",
-      "query": "Buttslinger Quickmelee",
-      "name": "Buttslinger Quickmelee"
-    },
-    {
-      "batch": 14,
-      "source": "modio",
-      "query": "Challenging Breach Minigame",
-      "name": "Challenging Breach Minigame",
-      "exclude": "0.5x"
-    },
-    {
-      "batch": 14,
-      "source": "modio",
-      "query": "Quickhack Loadouts",
-      "name": "Quickhack Loadouts"
-    },
-    {
-      "batch": 14,
-      "source": "modio",
-      "query": "Clear Skill Checks",
-      "name": "Clear Skill Checks"
-    },
-    {
-      "batch": 14,
-      "source": "modio",
-      "query": "Better Armor Tooltip",
-      "name": "Better Armor Tooltip"
-    },
-    {
-      "batch": 14,
-      "source": "modio",
-      "query": "Fluff Vendor Fixes",
-      "name": "Fluff Vendor Fixes"
-    },
-    {
-      "batch": 14,
-      "source": "modio",
-      "query": "Longer Car Delivery Timers",
-      "name": "Longer Car Delivery Timers"
-    },
-    {
-      "batch": 14,
-      "source": "modio",
-      "query": "Faster Checkpoints",
-      "name": "QoL - Faster Checkpoints"
-    },
-    {
-      "batch": 14,
-      "source": "modio",
-      "query": "Easier Sprint Activation",
-      "name": "Easier Sprint Activation"
-    },
-    {
-      "batch": 15,
-      "source": "modio",
-      "optional": true,
-      "query": "Natural Eye Colours",
-      "name": "Natural Eye Colours"
-    },
-    {
-      "batch": 15,
-      "source": "modio",
-      "optional": true,
-      "query": "E3 Cyberware",
-      "name": "E3 - Cyberware 01"
-    },
-    {
-      "batch": 15,
-      "source": "modio",
-      "optional": true,
-      "query": "E3 Complexion",
-      "name": "E3 Complexion (with make-up)"
-    },
-    {
-      "batch": 15,
-      "source": "modio",
-      "optional": true,
-      "query": "Christy Ponytail Hair",
-      "name": "HoV - Christy Ponytail Hair FEM V"
-    },
-    {
-      "batch": 15,
-      "source": "modio",
-      "optional": true,
-      "query": "Christy Buns Hair",
-      "name": "HoV - Christy Buns Hair FEM V"
-    },
-    {
-      "batch": 15,
-      "source": "modio",
-      "optional": true,
-      "query": "Christy Crown Hair",
-      "name": "HoV - Christy Crown Hair FEM V"
-    },
-    {
-      "batch": 15,
-      "source": "modio",
-      "optional": true,
-      "query": "Neo-Princess Hair",
-      "name": "HoV - Neo-Princess Hair FEM V"
-    },
-    {
-      "batch": 15,
-      "source": "modio",
-      "optional": true,
-      "query": "Neo-P Glam",
-      "name": "HoV - Neo-P Glam ver Hair FEM V"
-    },
-    {
-      "batch": 15,
-      "source": "modio",
-      "optional": true,
-      "query": "Anime Pigtails Hair",
-      "name": "HoV - Anime Pigtails Hair"
-    },
-    {
-      "batch": 15,
-      "source": "modio",
-      "optional": true,
-      "query": "Actually Black Hair Color",
-      "name": "HoV - Actually Black Hair Color"
-    },
-    {
-      "batch": 15,
-      "source": "modio",
-      "optional": true,
-      "query": "Actually Platinum Blond",
-      "name": "HoV - Actually Platinum Blond (pick one)"
-    },
-    {
-      "batch": 15,
-      "source": "modio",
-      "optional": true,
-      "query": "Vesnace Lips",
-      "name": "HoV - Vesnace lip colors"
     }
   ]
 }

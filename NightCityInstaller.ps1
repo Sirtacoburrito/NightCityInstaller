@@ -11,7 +11,7 @@ param([switch]$TestMode)
 
 $ErrorActionPreference = 'Stop'
 $script:AppName    = 'Night City Installer'
-$script:AppVersion = '1.2.0'
+$script:AppVersion = '1.2.1'
 $script:Root       = $PSScriptRoot
 $script:IsWin      = ($env:OS -eq 'Windows_NT')
 if ($env:LOCALAPPDATA) { $script:DataDir = Join-Path $env:LOCALAPPDATA 'NightCityInstaller' }
@@ -437,7 +437,7 @@ function Install-AppUpdate($Info, [string]$Token) {
 function New-Engine($Manifest, $Config, $State, $UI) {
     return [pscustomobject]@{
         manifest = $Manifest; config = $Config; state = $State; ui = $UI
-        queue = @(); pos = 0; mode = 'idle'; current = $null; purpose = 'install'
+        queue = @(); pos = 0; mode = 'idle'; current = $null; purpose = 'install'; modioNoted = $false
         currentBatch = 0; workInBatch = 0; lastSource = ''
         waitStart = [datetime]::MinValue; reminded = $false; sleepUntil = [datetime]::MinValue
         installed = $null; subscribed = $null
@@ -459,7 +459,8 @@ function Start-Engine($E, [string[]]$CheckedKeys) {
     $E.pos = 0; $E.current = $null; $E.currentBatch = 0; $E.workInBatch = 0
     if ($E.queue.Count -eq 0) { $E.mode = 'done'; $E.ui.Banner('Nothing to do: every ticked mod is already installed or skipped.', @()); return }
     $E.mode = 'running'
-    $E.ui.Log("Starting: $($E.queue.Count) mods queued.")
+    $nm = @($E.queue | Where-Object { $_.source -eq 'modio' }).Count
+    $E.ui.Log("Starting: $($E.queue.Count) mods queued. The $nm mod.io mods go first (no clicks needed), then the Nexus mods.")
 }
 
 # Queue Nexus updates (rows from the update check) instead of the install list.
@@ -616,6 +617,11 @@ function Step-Engine($E) {
 
     $item = $E.queue[$E.pos]
 
+    if ($E.purpose -eq 'install' -and $item.source -eq 'nexus' -and $E.pos -gt 0 -and $E.queue[$E.pos - 1].source -eq 'modio' -and $E.counts.subscribed -gt 0 -and -not $E.modioNoted) {
+        $E.modioNoted = $true
+        $E.ui.Log("mod.io done: subscribed to $($E.counts.subscribed) mods. Start the game and open Mods > My Collection to download them (any time, even while the Nexus part runs).")
+    }
+
     # batch checkpoint
     if ($E.config.pauseBetweenBatches -and $E.currentBatch -ne 0 -and $item.batch -ne $E.currentBatch -and $E.workInBatch -gt 0) {
         $E.mode = 'checkpoint'
@@ -699,13 +705,16 @@ function Open-NexusItem($E, $item, [string]$Url, [string]$Detail) {
 function Step-Modio($E, $item) {
     $tok = $E.config.modioToken
     if (-not $tok) {
-        $E.mode = 'paused'
-        $E.ui.Banner('The next mods come from mod.io. Add your mod.io access token under Accounts, then click Start to carry on.', @())
+        Set-ItemState $E $item 'Needs mod.io token' 'Add your mod.io token under Accounts, then click Start again' $false
+        Complete-Item $E 'skipped'
         return
     }
     if (-not $E.config.modioGameId) { $E.config.modioGameId = Resolve-ModioGameId $tok; Save-Config $E.config }
     $gid = $E.config.modioGameId
-    if (-not $E.subscribed) { $E.subscribed = Get-ModioSubscribed $gid $tok }
+    if (-not $E.subscribed) {
+        try { $me = Invoke-Modio Get 'me' $tok; $E.ui.Log("mod.io: subscribing for account '$($me.username)'. This must be the account linked in the game's Mods menu.") } catch {}
+        $E.subscribed = Get-ModioSubscribed $gid $tok
+    }
 
     $results = Search-Modio $gid $item.query $tok
     $sel = Select-ModioMatch $results $item.query $item.exclude
