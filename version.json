@@ -1,0 +1,22 @@
+{
+  "version": "1.1.0",
+  "notes": "Adds the Updates tab: checks every Vortex-installed Nexus mod and your mod.io subscriptions for updates, warns when the game is patched, and updates the app itself from GitHub.",
+  "files": [
+    {
+      "path": "NightCityInstaller.ps1",
+      "sha256": "421666556AD3ED0127B143A60319357096E1BFDB3F8AA51ECD99A2B54A5F9DD7"
+    },
+    {
+      "path": "manifest.json",
+      "sha256": "6D0AE5AACDE50CB6DE3E3850CB2BF6D85A8B658787229D1CAAD5B3601EE8018B"
+    },
+    {
+      "path": "README.txt",
+      "sha256": "FED95FC67EBAAB00D9B3124FD8AAE7CA80387662073F015409398AE6F2E1D282"
+    },
+    {
+      "path": "Start Night City Installer.bat",
+      "sha256": "61A39983C7374E0FD7FDC99362661F8F2A6EFB772E36D2E86EAEC07CD2DAF01C"
+    }
+  ]
+}

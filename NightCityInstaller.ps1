@@ -1,0 +1,1159 @@
+# Night City Installer
+# Installs the "Night City Load Order" mod list for Cyberpunk 2077 patch 2.5, in order.
+#  - Nexus mods: opens each mod's download page; you click "Slow download"; Vortex installs it;
+#    this app detects the install and moves on. (Nexus requires that click on free accounts.)
+#  - mod.io mods: subscribes your mod.io account to each mod (and its requirements) through the
+#    official mod.io API. The game downloads them from its Mods menu on next launch.
+# Your keys are stored encrypted for your Windows user only (DPAPI) and are sent only to
+# api.nexusmods.com and api.mod.io.
+
+param([switch]$TestMode)
+
+$ErrorActionPreference = 'Stop'
+$script:AppName    = 'Night City Installer'
+$script:AppVersion = '1.1.0'
+$script:Root       = $PSScriptRoot
+$script:IsWin      = ($env:OS -eq 'Windows_NT')
+if ($env:LOCALAPPDATA) { $script:DataDir = Join-Path $env:LOCALAPPDATA 'NightCityInstaller' }
+else { $script:DataDir = Join-Path ([IO.Path]::GetTempPath()) 'NightCityInstaller' }
+$script:DefaultGameDir = 'C:\Steam Modded\Steam\steamapps\common\Cyberpunk 2077'
+$script:NexusBase = 'https://api.nexusmods.com/v1'
+$script:ModioBase = 'https://api.mod.io/v1'
+$script:FrameworkIds = @{ 107='Cyber Engine Tweaks'; 2380='RED4ext'; 1511='redscript'; 4198='ArchiveXL'; 4197='TweakXL'; 7780='Codeware'; 4885='Mod Settings'; 3518='Native Settings UI' }
+
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+
+# ---------------------------------------------------------------- storage
+
+function Ensure-DataDir { if (-not (Test-Path $script:DataDir)) { New-Item -ItemType Directory -Path $script:DataDir -Force | Out-Null } }
+
+function Protect-Text([string]$Text) {
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+    if ($script:IsWin) { return (ConvertTo-SecureString -String $Text -AsPlainText -Force | ConvertFrom-SecureString) }
+    return 'b64:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Text))   # test runs on non-Windows only
+}
+
+function Unprotect-Text([string]$Blob) {
+    if ([string]::IsNullOrEmpty($Blob)) { return '' }
+    if ($Blob.StartsWith('b64:')) { return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Blob.Substring(4))) }
+    try {
+        $ss = ConvertTo-SecureString -String $Blob
+        $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($ss)
+        try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+    } catch { return '' }
+}
+
+function Read-JsonFile([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    return ($raw | ConvertFrom-Json)
+}
+
+function Write-JsonFile([string]$Path, $Object) {
+    Ensure-DataDir
+    $tmp = "$Path.tmp"
+    ($Object | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $tmp -Encoding UTF8
+    Move-Item -LiteralPath $tmp -Destination $Path -Force
+}
+
+function Load-Config {
+    $c = Read-JsonFile (Join-Path $script:DataDir 'config.json')
+    $cfg = @{ gameDir = ''; nexusKey = ''; modioToken = ''; githubToken = ''; modioGameId = 0; pauseBetweenBatches = $false; checkOnStart = $true }
+    if ($c) {
+        if ($c.PSObject.Properties['pauseBetweenBatches']) { $cfg.pauseBetweenBatches = [bool]$c.pauseBetweenBatches }
+        if ($c.PSObject.Properties['checkOnStart']) { $cfg.checkOnStart = [bool]$c.checkOnStart }
+        if ($c.PSObject.Properties['githubToken'] -and $c.githubToken) { $cfg.githubToken = Unprotect-Text ([string]$c.githubToken) }
+        if ($c.gameDir)     { $cfg.gameDir = [string]$c.gameDir }
+        if ($c.nexusKey)    { $cfg.nexusKey = Unprotect-Text ([string]$c.nexusKey) }
+        if ($c.modioToken)  { $cfg.modioToken = Unprotect-Text ([string]$c.modioToken) }
+        if ($c.modioGameId) { $cfg.modioGameId = [int]$c.modioGameId }
+    }
+    if (-not $cfg.gameDir -and (Test-Path -LiteralPath $script:DefaultGameDir)) { $cfg.gameDir = $script:DefaultGameDir }
+    return $cfg
+}
+
+function Save-Config($cfg) {
+    Write-JsonFile (Join-Path $script:DataDir 'config.json') ([ordered]@{
+        gameDir = $cfg.gameDir; nexusKey = (Protect-Text $cfg.nexusKey); modioToken = (Protect-Text $cfg.modioToken); modioGameId = $cfg.modioGameId
+        pauseBetweenBatches = [bool]$cfg.pauseBetweenBatches; checkOnStart = [bool]$cfg.checkOnStart; githubToken = (Protect-Text $cfg.githubToken) })
+}
+
+function Load-State {
+    $s = Read-JsonFile (Join-Path $script:DataDir 'state.json')
+    $h = @{}
+    if ($s) { foreach ($p in $s.PSObject.Properties) { $h[$p.Name] = @{ status = [string]$p.Value.status; detail = [string]$p.Value.detail; done = [bool]$p.Value.done } } }
+    return $h
+}
+
+function Save-State($state) { Write-JsonFile (Join-Path $script:DataDir 'state.json') $state }
+
+function Load-Manifest([string]$Path) {
+    if (-not $Path) { $Path = Join-Path $script:Root 'manifest.json' }
+    $m = Read-JsonFile $Path
+    if (-not $m) { throw "manifest.json not found next to the app ($Path)." }
+    $items = New-Object System.Collections.ArrayList
+    $order = 0
+    foreach ($x in $m.mods) {
+        $key = if ($x.source -eq 'nexus') { "nexus:$($x.id)" } else { "modio:$($x.query)" }
+        $null = $items.Add([pscustomobject]@{
+            key = $key; kind = 'install'; order = $order; batch = [int]$x.batch; source = [string]$x.source; name = [string]$x.name
+            id = if ($x.id) { [int]$x.id } else { 0 }; query = [string]$x.query; exclude = [string]$x.exclude
+            optional = [bool]$x.optional })
+        $order++
+    }
+    $batches = @{}
+    foreach ($b in $m.batches) { $batches[[int]$b.id] = [pscustomobject]@{ id = [int]$b.id; name = [string]$b.name; source = [string]$b.source } }
+    return [pscustomobject]@{ game = [string]$m.game; patchDate = [datetime]::Parse([string]$m.patchDate, [Globalization.CultureInfo]::InvariantCulture); items = $items; batches = $batches }
+}
+
+# ---------------------------------------------------------------- Vortex detection
+
+# Vortex names installed mods "<name> <nexusId> <version> <date> <hash>" (deployment file) or
+# "<name>-<nexusId>-<version>-<timestamp>" (staging folders). The Nexus ID is the first
+# 2-6 digit number that sits between separators and is followed by a version number.
+function Get-NexusIdFromName([string]$Name) {
+    $m = [regex]::Match($Name, '(?:^|[\s-])(\d{2,6})[\s-]v?\d')
+    if ($m.Success) { return [int]$m.Groups[1].Value }
+    return $null
+}
+
+function Get-VortexInfo([string]$GameDir) {
+    $info = [pscustomobject]@{ deploymentFound = $false; stagingPath = ''; ids = (New-Object 'System.Collections.Generic.HashSet[int]') }
+    $dep = Join-Path $GameDir 'vortex.deployment.json'
+    if (Test-Path -LiteralPath $dep) {
+        $d = Read-JsonFile $dep
+        $info.deploymentFound = $true
+        if ($d.stagingPath) { $info.stagingPath = [string]$d.stagingPath }
+        foreach ($src in ($d.files | ForEach-Object { $_.source } | Sort-Object -Unique)) {
+            $id = Get-NexusIdFromName $src
+            if ($id) { $null = $info.ids.Add($id) }
+        }
+    }
+    return $info
+}
+
+# IDs of every mod Vortex has installed: deployed ones plus anything in its staging folder
+# (a mod appears in staging as soon as Vortex finishes installing it, before deployment).
+function Get-InstalledNexusIds([string]$GameDir) {
+    $info = Get-VortexInfo $GameDir
+    $set = $info.ids
+    if ($info.stagingPath -and (Test-Path -LiteralPath $info.stagingPath)) {
+        foreach ($dir in (Get-ChildItem -LiteralPath $info.stagingPath -Directory -ErrorAction SilentlyContinue)) {
+            $id = Get-NexusIdFromName $dir.Name
+            if ($id) { $null = $set.Add($id) }
+        }
+    }
+    return ,$set
+}
+
+# Every Nexus mod Vortex has installed, with the installed version and file timestamp.
+# Deployment sources look like "ArchiveXL 4198 1.28.6 2026-10-29T12-59Z VquAqYEdu";
+# staging folders look like "ArchiveXL-4198-1-28-6-1761742740" (archive name + upload time).
+function Get-InstalledNexusMods([string]$GameDir) {
+    $mods = @{}
+    $add = {
+        param($id, $name, $ver, [long]$ts, $family)
+        if (-not $mods.ContainsKey($id) -or $ts -gt $mods[$id].ts) {
+            $mods[$id] = [pscustomobject]@{ id = $id; name = $name; version = $ver; ts = $ts; family = $family }
+        }
+    }
+    $info = Get-VortexInfo $GameDir
+    $dep = Join-Path $GameDir 'vortex.deployment.json'
+    if ($info.deploymentFound) {
+        $d = Read-JsonFile $dep
+        foreach ($src in ($d.files | ForEach-Object { $_.source } | Sort-Object -Unique)) {
+            $m = [regex]::Match($src, '^(?<name>.*?)\s(?<id>\d{2,6})\s(?<ver>\S+)\s(?<d>\d{4}-\d{2}-\d{2})T(?<h>\d{2})-(?<mi>\d{2})Z(\s\S+)?$')
+            if ($m.Success) {
+                $dt = [datetime]::ParseExact("$($m.Groups['d'].Value) $($m.Groups['h'].Value):$($m.Groups['mi'].Value)", 'yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AssumeUniversal,AdjustToUniversal')
+                $ts = [long]([datetimeoffset]$dt).ToUnixTimeSeconds()
+                & $add ([int]$m.Groups['id'].Value) $m.Groups['name'].Value $m.Groups['ver'].Value $ts ''
+            } else {
+                $id = Get-NexusIdFromName $src
+                if ($id) { & $add $id $src '' 0 '' }
+            }
+        }
+    }
+    if ($info.stagingPath -and (Test-Path -LiteralPath $info.stagingPath)) {
+        foreach ($dir in (Get-ChildItem -LiteralPath $info.stagingPath -Directory -ErrorAction SilentlyContinue)) {
+            $m = [regex]::Match($dir.Name, '^(?<name>.*?)-(?<id>\d{2,6})-(?<ver>.+?)-(?<ts>\d{9,11})$')
+            if ($m.Success) {
+                & $add ([int]$m.Groups['id'].Value) $m.Groups['name'].Value ($m.Groups['ver'].Value -replace '-', '.') ([long]$m.Groups['ts'].Value) $m.Groups['name'].Value
+            } else {
+                $id = Get-NexusIdFromName $dir.Name
+                if ($id) { & $add $id $dir.Name '' 0 '' }
+            }
+        }
+    }
+    return $mods
+}
+
+# True when Vortex has the mod, and (for updates) a file at least as new as MinTs.
+function Test-NexusInstalled([string]$GameDir, $Item) {
+    $mods = Get-InstalledNexusMods $GameDir
+    if (-not $mods.ContainsKey([int]$Item.id)) { return $false }
+    $min = 0
+    if ($Item.PSObject.Properties['minTs']) { $min = [long]$Item.minTs }
+    if ($min -le 0) { return $true }
+    return ($mods[[int]$Item.id].ts -ge ($min - 120))
+}
+
+function Normalize-Version([string]$v) { return (([string]$v).ToLowerInvariant() -replace '^v', '' -replace '[^0-9a-z.]', '.' -replace '\.+', '.').Trim('.') }
+
+# Newest MAIN file for an installed mod, and whether it is newer than what Vortex has.
+# When the mod has several MAIN variants, only files from the same family (archive name) count.
+function Get-NexusModUpdate($FilesResponse, $Installed) {
+    $main = @(@($FilesResponse.files) | Where-Object { [string]$_.category_name -eq 'MAIN' })
+    if ($main.Count -eq 0) { return $null }
+    if ($Installed.family) {
+        $fam = $Installed.family.ToLowerInvariant()
+        $same = @($main | Where-Object { ([string]$_.file_name).ToLowerInvariant() -like "$fam-$($Installed.id)-*" })
+        if ($same.Count -gt 0) { $main = $same }
+    }
+    $newest = $main | Sort-Object { [long]$_.uploaded_timestamp } -Descending | Select-Object -First 1
+    $newer = $false
+    if ($Installed.ts -gt 0) {
+        $newer = ([long]$newest.uploaded_timestamp -gt ($Installed.ts + 120)) -and ((Normalize-Version $newest.version) -ne (Normalize-Version $Installed.version))
+    } else {
+        $newer = ((Normalize-Version $newest.version) -ne (Normalize-Version $Installed.version))
+    }
+    return [pscustomobject]@{ file = $newest; version = [string]$newest.version; ts = [long]$newest.uploaded_timestamp; newer = $newer }
+}
+
+# Frameworks update first, in dependency order; everything else follows by name.
+$script:FrameworkOrder = @(2380, 107, 1511, 4198, 4197, 7780, 4575, 4885, 3518)
+function Get-UpdateSortKey([int]$Id, [string]$Name) {
+    $i = [array]::IndexOf($script:FrameworkOrder, $Id)
+    if ($i -ge 0) { return ('0{0:D2}' -f $i) }
+    return ('1' + $Name.ToLowerInvariant())
+}
+
+function Get-GameVersion([string]$GameDir) {
+    $logDir = Join-Path $GameDir 'red4ext\logs'
+    if (Test-Path -LiteralPath $logDir) {
+        $f = Get-ChildItem -LiteralPath $logDir -Filter 'red4ext-*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($f) {
+            $m = Select-String -LiteralPath $f.FullName -Pattern 'Product version:\s*(\S+)' -List
+            if ($m) { return $m.Matches[0].Groups[1].Value }
+        }
+    }
+    $exe = Join-Path $GameDir 'bin\x64\Cyberpunk2077.exe'
+    if (Test-Path -LiteralPath $exe) { try { $v = (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion; if ($v) { return $v.Trim() } } catch {} }
+    return ''
+}
+
+function Test-NxmHandler {
+    if (-not $script:IsWin) { return $true }
+    foreach ($k in 'Registry::HKEY_CURRENT_USER\Software\Classes\nxm\shell\open\command', 'Registry::HKEY_CLASSES_ROOT\nxm\shell\open\command') {
+        try { $v = (Get-ItemProperty -LiteralPath $k -ErrorAction Stop).'(default)'; if ($v -match 'Vortex') { return $true } } catch {}
+    }
+    return $false
+}
+
+# ---------------------------------------------------------------- web helpers
+
+function Get-HttpStatus($err) {
+    try { if ($err.Exception.Response) { return [int]$err.Exception.Response.StatusCode } } catch {}
+    # Fallback: PowerShell 5.1 says "(404) Not Found", PowerShell 7 says "404 (Not Found)".
+    $m = [regex]::Match([string]$err.Exception.Message, '\(?\b([45]\d\d)\b\)?\s*\(?(Not Found|Unauthorized|Forbidden|Too Many Requests|Bad Request|Internal Server Error|Service Unavailable)')
+    if ($m.Success) { return [int]$m.Groups[1].Value }
+    return 0
+}
+
+function Invoke-Nexus([string]$Path, [string]$Key) {
+    $h = @{ apikey = $Key; Accept = 'application/json'; 'Application-Name' = 'NightCityInstaller'; 'Application-Version' = $script:AppVersion }
+    return Invoke-RestMethod -Method Get -Uri "$($script:NexusBase)/$Path" -Headers $h -TimeoutSec 30
+}
+
+function Invoke-Modio([string]$Method, [string]$Path, [string]$Token) {
+    $h = @{ Authorization = "Bearer $Token"; Accept = 'application/json' }
+    if ($Method -eq 'Post') {
+        return Invoke-RestMethod -Method Post -Uri "$($script:ModioBase)/$Path" -Headers $h -ContentType 'application/x-www-form-urlencoded' -Body '' -TimeoutSec 30
+    }
+    return Invoke-RestMethod -Method Get -Uri "$($script:ModioBase)/$Path" -Headers $h -TimeoutSec 30
+}
+
+function UrlEnc([string]$s) { return [Uri]::EscapeDataString($s) }
+
+# ---------------------------------------------------------------- Nexus logic
+
+function ConvertFrom-Unix([long]$t) { return ([datetime]'1970-01-01Z').ToUniversalTime().AddSeconds($t) }
+
+# Picks the file to install. Prefers the author's primary MAIN file when it was uploaded on or
+# after the patch date, then the newest post-patch MAIN file, then (flagged) the best pre-patch one.
+function Select-NexusMainFile($FilesResponse, [datetime]$PatchDate) {
+    $all = @($FilesResponse.files)
+    $main = @($all | Where-Object { [string]$_.category_name -eq 'MAIN' })
+    if ($main.Count -eq 0) { $main = @($all | Where-Object { @('OLD_VERSION','ARCHIVED','DELETED','MISCELLANEOUS') -notcontains [string]$_.category_name }) }
+    if ($main.Count -eq 0) { return $null }
+    $withDate = foreach ($f in $main) { [pscustomobject]@{ file = $f; date = (ConvertFrom-Unix ([long]$f.uploaded_timestamp)); primary = [bool]$f.is_primary } }
+    $post = @($withDate | Where-Object { $_.date -ge $PatchDate.ToUniversalTime() })
+    $pick = $null
+    if ($post.Count -gt 0) {
+        $prim = @($post | Where-Object { $_.primary })
+        if ($prim.Count -gt 0) { $pick = $prim | Sort-Object date -Descending | Select-Object -First 1 }
+        else { $pick = $post | Sort-Object date -Descending | Select-Object -First 1 }
+        return [pscustomobject]@{ file = $pick.file; date = $pick.date; postPatch = $true }
+    }
+    $prim = @($withDate | Where-Object { $_.primary })
+    if ($prim.Count -gt 0) { $pick = $prim | Sort-Object date -Descending | Select-Object -First 1 }
+    else { $pick = $withDate | Sort-Object date -Descending | Select-Object -First 1 }
+    return [pscustomobject]@{ file = $pick.file; date = $pick.date; postPatch = $false }
+}
+
+function Get-NexusDownloadUrl([string]$Game, [int]$ModId, $FileId) {
+    if ($FileId) { return "https://www.nexusmods.com/$Game/mods/$ModId`?tab=files&file_id=$FileId&nmm=1" }
+    return "https://www.nexusmods.com/$Game/mods/$ModId`?tab=files"
+}
+
+# ---------------------------------------------------------------- mod.io logic
+
+function Normalize-Name([string]$s) {
+    if (-not $s) { return '' }
+    $t = $s -replace '\[[^\]]*\]', ' '
+    $t = $t -replace '^\s*(New Quest|QoL|HoV)\s*[-:\u2013\u2014]\s*', ''
+    return (($t.ToLowerInvariant()) -replace '[^a-z0-9]', '')
+}
+
+function Select-ModioMatch($Results, [string]$Query, [string]$Exclude) {
+    $cands = @($Results | Where-Object { -not ($Exclude -and ([string]$_.name).ToLowerInvariant().Contains($Exclude.ToLowerInvariant())) })
+    $nq = Normalize-Name $Query
+    $exact = @($cands | Where-Object { (Normalize-Name $_.name) -eq $nq -or ((([string]$_.name).ToLowerInvariant()) -replace '[^a-z0-9]', '') -eq $nq })
+    if ($exact.Count -eq 1) { return [pscustomobject]@{ match = $exact[0]; choices = @() } }
+    if ($exact.Count -gt 1) { return [pscustomobject]@{ match = $null; choices = $exact } }
+    $contains = @($cands | Where-Object { (Normalize-Name $_.name).Contains($nq) })
+    if ($contains.Count -eq 1) { return [pscustomobject]@{ match = $contains[0]; choices = @() } }
+    if ($contains.Count -gt 1) { return [pscustomobject]@{ match = $null; choices = $contains } }
+    return [pscustomobject]@{ match = $null; choices = @() }
+}
+
+function Select-MostPopular($Choices) {
+    return (@($Choices) | Sort-Object -Property @{ Expression = { try { [long]$_.stats.downloads_total } catch { 0 } } } -Descending | Select-Object -First 1)
+}
+
+function Resolve-ModioGameId([string]$Token) {
+    $r = Invoke-Modio Get 'games?name_id=cyberpunk2077' $Token
+    $g = @($r.data) | Select-Object -First 1
+    if (-not $g) {
+        $r = Invoke-Modio Get ('games?_q=' + (UrlEnc 'Cyberpunk 2077')) $Token
+        $g = @($r.data) | Where-Object { $_.name -match 'Cyberpunk 2077' } | Select-Object -First 1
+    }
+    if (-not $g) { throw 'Could not find Cyberpunk 2077 on mod.io.' }
+    return [int]$g.id
+}
+
+function Get-ModioSubscribed([int]$GameId, [string]$Token) {
+    $set = New-Object 'System.Collections.Generic.HashSet[int]'
+    $offset = 0
+    while ($true) {
+        $r = Invoke-Modio Get "me/subscribed?game_id=$GameId&_limit=100&_offset=$offset" $Token
+        foreach ($m in @($r.data)) { $null = $set.Add([int]$m.id) }
+        $n = @($r.data).Count
+        if ($n -lt 100) { break }
+        $offset += 100
+    }
+    return ,$set
+}
+
+function Search-Modio([int]$GameId, [string]$Query, [string]$Token) {
+    $r = Invoke-Modio Get "games/$GameId/mods?_q=$(UrlEnc $Query)&_limit=30" $Token
+    return @($r.data)
+}
+
+function Get-ModioDependencies([int]$GameId, [int]$ModId, [string]$Token) {
+    try { $r = Invoke-Modio Get "games/$GameId/mods/$ModId/dependencies" $Token } catch { if ((Get-HttpStatus $_) -eq 404) { return @() } else { throw } }
+    return @($r.data)
+}
+
+function Add-ModioSubscription([int]$GameId, [int]$ModId, [string]$Token) {
+    $null = Invoke-Modio Post "games/$GameId/mods/$ModId/subscribe" $Token
+}
+
+# ---------------------------------------------------------------- app self-update
+# New versions are published to a GitHub repo as version.json plus the app files.
+# version.json: { "version": "1.2.0", "notes": "...", "files": [ { "path": "NightCityInstaller.ps1", "sha256": "..." }, ... ] }
+# The repo is public, so no token is needed. A token (Contents: Read-only) is only used if the repo is ever made private.
+
+$script:UpdateRepo = 'Sirtacoburrito/NightCityInstaller'
+$script:UpdateRef  = 'main'
+
+function Save-RepoFile([string]$Path, [string]$Token, [string]$OutFile) {
+    $h = @{ 'User-Agent' = 'NightCityInstaller'; Accept = 'application/vnd.github.raw+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+    if ($Token) { $h['Authorization'] = "Bearer $Token" }
+    $uri = "https://api.github.com/repos/$($script:UpdateRepo)/contents/$(UrlEnc $Path)?ref=$($script:UpdateRef)"
+    Invoke-WebRequest -Uri $uri -Headers $h -OutFile $OutFile -UseBasicParsing -TimeoutSec 60 | Out-Null
+}
+
+function Test-SafeFileName([string]$Name) { return ($Name -match '^[A-Za-z0-9][A-Za-z0-9 ._-]*$' -and $Name -notmatch '\.\.') }
+
+# Returns the parsed version.json when it offers a newer version than this app, otherwise $null.
+function Test-AppUpdate([string]$Token) {
+    Ensure-DataDir
+    $tmp = Join-Path $script:DataDir 'version-check.json'
+    try { Save-RepoFile 'version.json' $Token $tmp }
+    catch {
+        $code = Get-HttpStatus $_
+        if ($code -eq 404 -and -not $Token) { throw 'The update repo could not be found. It may have been made private or renamed; a GitHub token under Accounts is only needed for a private repo.' }
+        if ($code -eq 404 -or $code -eq 401) { throw 'GitHub refused access. If you added a GitHub token under Accounts, check it, or clear it (the public repo needs none).' }
+        throw
+    }
+    $j = Get-Content -LiteralPath $tmp -Raw -Encoding UTF8 | ConvertFrom-Json
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    if (-not $j.version) { throw 'version.json in the update repo has no version.' }
+    if ([version]$j.version -gt [version]$script:AppVersion) { return $j }
+    return $null
+}
+
+# Downloads every file, checks its SHA-256, backs up the current files, then swaps them in.
+function Install-AppUpdate($Info, [string]$Token) {
+    $stage = Join-Path $script:DataDir ('update-' + $Info.version)
+    if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+    New-Item -ItemType Directory -Path $stage -Force | Out-Null
+    $files = @($Info.files)
+    if ($files.Count -eq 0) { throw 'The update lists no files.' }
+    foreach ($f in $files) {
+        $name = [string]$f.path
+        if (-not (Test-SafeFileName $name)) { throw "The update contains an unsafe file name: $name" }
+        $out = Join-Path $stage $name
+        Save-RepoFile $name $Token $out
+        $hash = (Get-FileHash -LiteralPath $out -Algorithm SHA256).Hash
+        if ($hash -ine [string]$f.sha256) { throw "Download check failed for $name. Nothing was changed." }
+    }
+    $backup = Join-Path $script:DataDir ('backup-' + $script:AppVersion)
+    New-Item -ItemType Directory -Path $backup -Force | Out-Null
+    foreach ($f in $files) {
+        $cur = Join-Path $script:Root ([string]$f.path)
+        if (Test-Path -LiteralPath $cur) { Copy-Item -LiteralPath $cur -Destination (Join-Path $backup ([string]$f.path)) -Force }
+    }
+    foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path $stage ([string]$f.path)) -Destination (Join-Path $script:Root ([string]$f.path)) -Force }
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    return $backup
+}
+
+# ---------------------------------------------------------------- engine (UI-independent)
+# The UI object supplies: Log(msg) SetStatus(key,status,detail) Banner(text, [string[]]buttons) OpenUrl(url) Choose(title, items) -> index or -1
+
+function New-Engine($Manifest, $Config, $State, $UI) {
+    return [pscustomobject]@{
+        manifest = $Manifest; config = $Config; state = $State; ui = $UI
+        queue = @(); pos = 0; mode = 'idle'; current = $null; purpose = 'install'
+        currentBatch = 0; workInBatch = 0; lastSource = ''
+        waitStart = [datetime]::MinValue; reminded = $false; sleepUntil = [datetime]::MinValue
+        installed = $null; subscribed = $null
+        counts = @{ installed = 0; subscribed = 0; skipped = 0; already = 0; failed = 0 }
+        clock = { [datetime]::UtcNow }
+    }
+}
+
+function Set-ItemState($E, $Item, [string]$Status, [string]$Detail, [bool]$Done) {
+    if ($Item.kind -ne 'update') {
+        $E.state[$Item.key] = @{ status = $Status; detail = $Detail; done = $Done }
+        Save-State $E.state
+    }
+    $E.ui.SetStatus($Item.key, $Status, $Detail)
+}
+
+function Start-Engine($E, [string[]]$CheckedKeys) {
+    $E.queue = @($E.manifest.items | Where-Object { $CheckedKeys -contains $_.key -and -not ($E.state.ContainsKey($_.key) -and $E.state[$_.key].done) } | Sort-Object order)
+    $E.pos = 0; $E.current = $null; $E.currentBatch = 0; $E.workInBatch = 0
+    if ($E.queue.Count -eq 0) { $E.mode = 'done'; $E.ui.Banner('Nothing to do: every ticked mod is already installed or skipped.', @()); return }
+    $E.mode = 'running'
+    $E.ui.Log("Starting: $($E.queue.Count) mods queued.")
+}
+
+# Queue Nexus updates (rows from the update check) instead of the install list.
+function Start-UpdateEngine($E, $Updates) {
+    $E.purpose = 'update'
+    $E.queue = @($Updates | ForEach-Object {
+        [pscustomobject]@{ key = "update:$($_.id)"; kind = 'update'; order = 0; batch = 0; source = 'nexus'; name = $_.name
+            id = [int]$_.id; fileId = $_.fileId; version = $_.latest; minTs = [long]$_.latestTs; query = ''; exclude = ''; optional = $false } })
+    $E.pos = 0; $E.current = $null; $E.currentBatch = 0; $E.workInBatch = 0
+    if ($E.queue.Count -eq 0) { $E.mode = 'done'; $E.ui.Banner('No updates ticked.', @()); return }
+    $E.mode = 'running'
+    $E.ui.Log("Updating $($E.queue.Count) mods.")
+}
+
+# ---- update checker: one mod per Step call so the window stays responsive
+
+function New-UpdateChecker($Config, $State, $UI) {
+    return [pscustomobject]@{ config = $Config; state = $State; ui = $UI; todo = @(); pos = 0; results = (New-Object System.Collections.ArrayList); done = $false; phase = 'nexus' }
+}
+
+function Start-UpdateCheck($C) {
+    $mods = Get-InstalledNexusMods $C.config.gameDir
+    $C.todo = @($mods.Values | Sort-Object { Get-UpdateSortKey $_.id $_.name })
+    $C.pos = 0; $C.results.Clear(); $C.done = $false
+    $C.phase = if ($C.config.nexusKey) { 'nexus' } else { 'modio' }
+    if (-not $C.config.nexusKey) {
+        foreach ($m in $C.todo) {
+            $row = [pscustomobject]@{ key = "upd:$($m.id)"; source = 'Nexus'; id = $m.id; name = $m.name; installed = $m.version; latest = ''; latestTs = 0; fileId = $null; status = 'Add a Nexus key under Accounts to check'; update = $false; framework = ($script:FrameworkOrder -contains $m.id) }
+            $null = $C.results.Add($row); $C.ui.UpdateRow($row)
+        }
+    }
+}
+
+function Step-UpdateCheck($C) {
+    if ($C.done) { return }
+    if ($C.phase -eq 'nexus') {
+        if ($C.pos -ge $C.todo.Count) { $C.phase = 'modio'; return }
+        $m = $C.todo[$C.pos]; $C.pos++
+        $row = [pscustomobject]@{ key = "upd:$($m.id)"; source = 'Nexus'; id = $m.id; name = $m.name; installed = $m.version; latest = ''; latestTs = 0; fileId = $null; status = ''; update = $false; framework = ($script:FrameworkOrder -contains $m.id) }
+        try {
+            $files = Invoke-Nexus "games/cyberpunk2077/mods/$($m.id)/files.json" $C.config.nexusKey
+            $u = Get-NexusModUpdate $files $m
+            if (-not $u) { $row.status = 'No main file on Nexus' }
+            else {
+                $row.latest = $u.version; $row.latestTs = $u.ts; $row.fileId = $u.file.file_id
+                if ($u.newer) { $row.update = $true; $row.status = 'Update available (' + (ConvertFrom-Unix $u.ts).ToString('yyyy-MM-dd') + ')' } else { $row.status = 'Up to date' }
+            }
+        } catch {
+            $code = Get-HttpStatus $_
+            $row.status = if ($code -eq 404) { 'Not on Nexus (hidden or removed)' } elseif ($code -eq 401) { 'Nexus key rejected' } else { 'Check failed: ' + $_.Exception.Message }
+        }
+        $null = $C.results.Add($row)
+        $C.ui.UpdateRow($row)
+        return
+    }
+    if ($C.phase -eq 'modio') {
+        $C.phase = 'end'
+        if ($C.config.modioToken) {
+            try {
+                if (-not $C.config.modioGameId) { $C.config.modioGameId = Resolve-ModioGameId $C.config.modioToken; Save-Config $C.config }
+                $seen = @{}
+                if ($C.state.ContainsKey('__modioSeen') -and $C.state['__modioSeen'].detail) { $seen = ConvertFrom-SeenString $C.state['__modioSeen'].detail }
+                $subs = Get-ModioSubscribedDetails $C.config.modioGameId $C.config.modioToken
+                $newSeen = @{}
+                foreach ($s in $subs) {
+                    $newSeen["$($s.id)"] = [long]$s.date_updated
+                    $prev = if ($seen.ContainsKey("$($s.id)")) { [long]$seen["$($s.id)"] } else { 0 }
+                    $ver = ''; try { $ver = [string]$s.modfile.version } catch {}
+                    $st = if ($prev -gt 0 -and [long]$s.date_updated -gt $prev) { 'Updated ' + (ConvertFrom-Unix ([long]$s.date_updated)).ToString('yyyy-MM-dd') + ': the game installs it on next launch' } else { 'Up to date (the game keeps mod.io mods updated)' }
+                    $row = [pscustomobject]@{ key = "updm:$($s.id)"; source = 'mod.io'; id = [int]$s.id; name = [string]$s.name; installed = ''; latest = $ver; latestTs = [long]$s.date_updated; fileId = $null; status = $st; update = $false; framework = $false }
+                    $null = $C.results.Add($row); $C.ui.UpdateRow($row)
+                }
+                $C.state['__modioSeen'] = @{ status = ''; detail = (ConvertTo-SeenString $newSeen); done = $false }
+                Save-State $C.state
+            } catch { $C.ui.Log('mod.io check failed: ' + $_.Exception.Message) }
+        }
+        return
+    }
+    $C.done = $true
+    $n = @($C.results | Where-Object { $_.update }).Count
+    $C.state['__lastCheck'] = @{ status = ''; detail = (Get-Date).ToString('yyyy-MM-dd HH:mm'); done = $false }
+    Save-State $C.state
+    $C.ui.CheckFinished($n)
+}
+
+function ConvertTo-SeenString($h) { return (($h.Keys | ForEach-Object { "$_=$($h[$_])" }) -join ';') }
+function ConvertFrom-SeenString([string]$s) { $h = @{}; foreach ($p in ($s -split ';')) { if ($p -match '^(\d+)=(\d+)$') { $h[$Matches[1]] = [long]$Matches[2] } }; return $h }
+
+function Get-ModioSubscribedDetails([int]$GameId, [string]$Token) {
+    $all = New-Object System.Collections.ArrayList
+    $offset = 0
+    while ($true) {
+        $r = Invoke-Modio Get "me/subscribed?game_id=$GameId&_limit=100&_offset=$offset" $Token
+        foreach ($m in @($r.data)) { $null = $all.Add($m) }
+        if (@($r.data).Count -lt 100) { break }
+        $offset += 100
+    }
+    return $all
+}
+
+function Complete-Item($E, [string]$Kind) {
+    switch ($Kind) {
+        'installed'  { $E.counts.installed++;  $E.workInBatch++ }
+        'subscribed' { $E.counts.subscribed++; $E.workInBatch++ }
+        'skipped'    { $E.counts.skipped++ }
+        'already'    { $E.counts.already++ }
+        'failed'     { $E.counts.failed++ }
+    }
+    $E.current = $null; $E.pos++; $E.mode = 'running'; $E.reminded = $false
+}
+
+function Get-CheckpointText($E, [int]$BatchId) {
+    $b = $E.manifest.batches[$BatchId]
+    if ($b.source -eq 'modio') {
+        return "Batch done: $($b.name). Start the game and open Mods from the main menu so it downloads your new mod.io subscriptions (sign in with the same mod.io account). Load a save, check that everything works, close the game, then click Continue."
+    }
+    return "Batch done: $($b.name). Vortex deploys automatically, so start the game now, load a save and check that it runs. Close the game, then click Continue."
+}
+
+function Step-Engine($E) {
+    $now = & $E.clock
+    if ($now -lt $E.sleepUntil) { return }
+    switch ($E.mode) {
+        'waitNexus' {
+            if (Test-NexusInstalled $E.config.gameDir $E.current) {
+                $verb = if ($E.current.kind -eq 'update') { 'Updated' } else { 'Installed' }
+                Set-ItemState $E $E.current $verb "$verb by Vortex" $true
+                $E.ui.Log("${verb}: $($E.current.name)")
+                Complete-Item $E 'installed'
+            } elseif (-not $E.reminded -and ($now - $E.waitStart).TotalMinutes -ge 10) {
+                $E.reminded = $true
+                $E.ui.Banner("Still waiting for $($E.current.name). If Vortex already installed it, click 'It's installed'. If the download didn't start, open the page again and click 'Slow download' (or 'Mod manager download').", @('Open page again', "It's installed", 'Skip'))
+            }
+            return
+        }
+        'running' { }
+        default { return }
+    }
+
+    if ($E.pos -ge $E.queue.Count -and $E.purpose -eq 'update') {
+        $E.mode = 'done'
+        $c = $E.counts
+        $E.ui.Banner("Updates finished. Updated $($c.installed), $($c.already) were already current, $($c.skipped) skipped, $($c.failed) failed. Start the game once to make sure everything loads.", @())
+        $E.ui.Log('Updates done.')
+        return
+    }
+    if ($E.pos -ge $E.queue.Count) {
+        $E.mode = 'done'
+        $c = $E.counts
+        $E.ui.Banner("Finished. Installed $($c.installed) from Nexus, subscribed to $($c.subscribed) on mod.io, $($c.already) were already in place, $($c.skipped) skipped, $($c.failed) failed. Start the game once more so it downloads the last mod.io subscriptions.", @())
+        $E.ui.Log('All done.')
+        return
+    }
+
+    $item = $E.queue[$E.pos]
+
+    # batch checkpoint
+    if ($E.config.pauseBetweenBatches -and $E.currentBatch -ne 0 -and $item.batch -ne $E.currentBatch -and $E.workInBatch -gt 0) {
+        $E.mode = 'checkpoint'
+        $E.ui.Banner((Get-CheckpointText $E $E.currentBatch), @('Continue'))
+        return
+    }
+    if ($item.batch -ne $E.currentBatch) { $E.currentBatch = $item.batch; $E.workInBatch = 0 }
+
+    $E.current = $item
+    try {
+        if ($item.source -eq 'nexus') { Step-Nexus $E $item } else { Step-Modio $E $item }
+    } catch {
+        $code = Get-HttpStatus $_
+        if ($code -eq 429) {
+            $E.sleepUntil = $now.AddSeconds(60)
+            $E.ui.Log("Rate limited by the server. Waiting a minute before retrying $($item.name).")
+            $E.current = $null
+            return
+        }
+        $msg = $_.Exception.Message
+        if ($code -eq 401) { $msg = 'The key or token was rejected. Check it under Accounts.' }
+        Set-ItemState $E $item 'Failed' $msg $false
+        $E.ui.Log("Failed: $($item.name): $msg")
+        Complete-Item $E 'failed'
+    }
+}
+
+function Step-Nexus($E, $item) {
+    if ($item.kind -eq 'update') {
+        if (Test-NexusInstalled $E.config.gameDir $item) {
+            Set-ItemState $E $item 'Up to date' 'Already on the newest file' $true
+            Complete-Item $E 'already'; return
+        }
+        Open-NexusItem $E $item (Get-NexusDownloadUrl $E.manifest.game $item.id $item.fileId) "Updating to v$($item.version)"
+        return
+    }
+    $ids = Get-InstalledNexusIds $E.config.gameDir
+    if ($ids.Contains($item.id)) {
+        Set-ItemState $E $item 'Already installed' 'Found in Vortex' $true
+        Complete-Item $E 'already'
+        return
+    }
+    $fileId = $null; $detail = 'Pick the newest main file'
+    if ($E.config.nexusKey) {
+        $files = Invoke-Nexus "games/$($E.manifest.game)/mods/$($item.id)/files.json" $E.config.nexusKey
+        $sel = Select-NexusMainFile $files $E.manifest.patchDate
+        if (-not $sel) {
+            Set-ItemState $E $item 'Failed' 'No downloadable main file on Nexus' $false
+            Complete-Item $E 'failed'; return
+        }
+        $fileId = $sel.file.file_id
+        $detail = "v$($sel.file.version), uploaded $($sel.date.ToString('yyyy-MM-dd'))"
+        if (-not $sel.postPatch) {
+            # Keep the setup 2.5-safe without asking: a file older than the patch is skipped.
+            Set-ItemState $E $item 'Skipped' "Newest file ($detail) is older than patch 2.5" $true
+            $E.ui.Log("Skipped $($item.name): its newest main file predates patch 2.5.")
+            Complete-Item $E 'skipped'
+            return
+        }
+    }
+    Open-NexusItem $E $item (Get-NexusDownloadUrl $E.manifest.game $item.id $fileId) $detail
+}
+
+function Open-NexusItem($E, $item, [string]$Url, [string]$Detail) {
+    $E.current | Add-Member -NotePropertyName pendingUrl -NotePropertyValue $Url -Force
+    $E.ui.OpenUrl($Url)
+    $E.mode = 'waitNexus'; $E.waitStart = (& $E.clock); $E.reminded = $false
+    $E.ui.SetStatus($item.key, 'Waiting for your click', $Detail)
+    $E.ui.Banner("Your browser opened $($item.name) on Nexus. Click 'Slow download' (or 'Mod manager download'). Vortex downloads and installs it, and this app moves on by itself.", @('Open page again', "It's installed", 'Skip'))
+}
+
+function Step-Modio($E, $item) {
+    $tok = $E.config.modioToken
+    if (-not $tok) {
+        $E.mode = 'paused'
+        $E.ui.Banner('The next mods come from mod.io. Add your mod.io access token under Accounts, then click Start to carry on.', @())
+        return
+    }
+    if (-not $E.config.modioGameId) { $E.config.modioGameId = Resolve-ModioGameId $tok; Save-Config $E.config }
+    $gid = $E.config.modioGameId
+    if (-not $E.subscribed) { $E.subscribed = Get-ModioSubscribed $gid $tok }
+
+    $results = Search-Modio $gid $item.query $tok
+    $sel = Select-ModioMatch $results $item.query $item.exclude
+    $mod = $sel.match
+    if (-not $mod -and $sel.choices.Count -gt 0) {
+        # No prompt: take the most-downloaded match and record the choice.
+        $mod = Select-MostPopular $sel.choices
+        $others = @($sel.choices | Where-Object { $_.id -ne $mod.id } | ForEach-Object { $_.name }) -join '; '
+        $E.ui.Log("Several matches for '$($item.query)'. Picked the most downloaded: '$($mod.name)'. Others: $others")
+    }
+    if (-not $mod) {
+        Set-ItemState $E $item 'Not found' "No mod.io match for '$($item.query)'. It may have been removed from the catalog." $false
+        $E.ui.Log("Not found on mod.io: $($item.name)")
+        Complete-Item $E 'failed'; return
+    }
+    $mid = [int]$mod.id
+    if ($E.subscribed.Contains($mid)) {
+        Set-ItemState $E $item 'Already subscribed' ([string]$mod.name) $true
+        Complete-Item $E 'already'; return
+    }
+    foreach ($dep in (Get-ModioDependencies $gid $mid $tok)) {
+        $did = [int]$dep.mod_id
+        if ($did -and -not $E.subscribed.Contains($did)) {
+            Add-ModioSubscription $gid $did $tok
+            $null = $E.subscribed.Add($did)
+            $E.ui.Log("Subscribed to requirement '$($dep.name)' for $($item.name)")
+        }
+    }
+    Add-ModioSubscription $gid $mid $tok
+    $null = $E.subscribed.Add($mid)
+    Set-ItemState $E $item 'Subscribed' ([string]$mod.name) $true
+    $E.ui.Log("Subscribed: $($mod.name)")
+    Complete-Item $E 'subscribed'
+}
+
+# Banner button handler, shared by the GUI and tests.
+function Invoke-EngineAction($E, [string]$Action) {
+    $item = $E.current
+    switch ($Action) {
+        'Continue'        { if ($E.mode -eq 'checkpoint') { $E.workInBatch = 0; $E.currentBatch = 0; $E.mode = 'running'; $E.ui.Banner('', @()) } }
+        'Open page again' { if ($item -and $item.pendingUrl) { $E.ui.OpenUrl($item.pendingUrl) } }
+        "It's installed"  { if ($item) { Set-ItemState $E $item 'Installed' 'Marked installed by you' $true; $E.ui.Log("Marked installed: $($item.name)"); Complete-Item $E 'installed'; $E.ui.Banner('', @()) } }
+        'Skip'            { if ($item) { Set-ItemState $E $item 'Skipped' 'Skipped by you' $true; $E.ui.Log("Skipped: $($item.name)"); Complete-Item $E 'skipped'; $E.ui.Banner('', @()) } }
+    }
+}
+
+function Get-PreflightWarnings($Config) {
+    $w = New-Object System.Collections.ArrayList
+    if (-not $Config.gameDir -or -not (Test-Path -LiteralPath (Join-Path $Config.gameDir 'bin\x64\Cyberpunk2077.exe'))) {
+        $null = $w.Add('Choose your Cyberpunk 2077 folder (the one that contains bin\x64\Cyberpunk2077.exe).')
+        return $w
+    }
+    $info = Get-VortexInfo $Config.gameDir
+    if (-not $info.deploymentFound) { $null = $w.Add("Vortex hasn't deployed to this folder yet, so installs can't be detected. Open Vortex, manage Cyberpunk 2077 and deploy once.") }
+    else {
+        $missing = @($script:FrameworkIds.Keys | Where-Object { -not $info.ids.Contains([int]$_) } | ForEach-Object { $script:FrameworkIds[$_] })
+        if ($missing.Count -gt 0) { $null = $w.Add('Missing frameworks in Vortex: ' + ($missing -join ', ') + '. Install their 2.5 versions first.') }
+    }
+    if (-not (Test-NxmHandler)) { $null = $w.Add("Vortex isn't set to handle Nexus download links. In Vortex: Settings > Downloads > turn on 'Handle Nexus links'.") }
+    return $w
+}
+
+# ---------------------------------------------------------------- GUI
+
+function Start-App {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    [Windows.Forms.Application]::EnableVisualStyles()
+
+    Ensure-DataDir
+    $script:LogFile = Join-Path $script:DataDir 'log.txt'
+    $manifest = Load-Manifest
+    $config = Load-Config
+    $state = Load-State
+
+    $font = New-Object Drawing.Font('Segoe UI', 9.5)
+    $bold = New-Object Drawing.Font('Segoe UI Semibold', 10.5)
+
+    $form = New-Object Windows.Forms.Form
+    $form.Text = "$($script:AppName) $($script:AppVersion)"
+    $form.Size = New-Object Drawing.Size(1100, 820)
+    $form.MinimumSize = New-Object Drawing.Size(880, 620)
+    $form.StartPosition = 'CenterScreen'
+    $form.Font = $font
+
+    # ---- top: game folder + accounts
+    $top = New-Object Windows.Forms.TableLayoutPanel
+    $top.Dock = 'Top'; $top.AutoSize = $true; $top.ColumnCount = 4; $top.Padding = New-Object Windows.Forms.Padding(10, 10, 10, 4)
+    [void]$top.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('AutoSize')))
+    [void]$top.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 100)))
+    [void]$top.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('AutoSize')))
+    [void]$top.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('AutoSize')))
+    $lblGame = New-Object Windows.Forms.Label; $lblGame.Text = 'Game folder'; $lblGame.AutoSize = $true; $lblGame.Anchor = 'Left'
+    $txtGame = New-Object Windows.Forms.TextBox; $txtGame.Text = $config.gameDir; $txtGame.Dock = 'Fill'
+    $btnBrowse = New-Object Windows.Forms.Button; $btnBrowse.Text = 'Browse...'; $btnBrowse.AutoSize = $true
+    $btnAccounts = New-Object Windows.Forms.Button; $btnAccounts.Text = 'Accounts...'; $btnAccounts.AutoSize = $true
+    $lblAcct = New-Object Windows.Forms.Label; $lblAcct.AutoSize = $true; $lblAcct.ForeColor = [Drawing.Color]::DimGray
+    $top.Controls.Add($lblGame, 0, 0); $top.Controls.Add($txtGame, 1, 0); $top.Controls.Add($btnBrowse, 2, 0); $top.Controls.Add($btnAccounts, 3, 0)
+    $top.Controls.Add($lblAcct, 1, 1); $top.SetColumnSpan($lblAcct, 3)
+
+    # ---- banner
+    $banner = New-Object Windows.Forms.Panel
+    $banner.Dock = 'Top'; $banner.Height = 92; $banner.BackColor = [Drawing.Color]::FromArgb(255, 246, 214); $banner.Padding = New-Object Windows.Forms.Padding(12, 8, 12, 8)
+    $bannerText = New-Object Windows.Forms.Label; $bannerText.Dock = 'Fill'; $bannerText.Font = $bold
+    $bannerBtns = New-Object Windows.Forms.FlowLayoutPanel; $bannerBtns.Dock = 'Bottom'; $bannerBtns.Height = 36; $bannerBtns.FlowDirection = 'LeftToRight'
+    $banner.Controls.Add($bannerText); $banner.Controls.Add($bannerBtns)
+
+    # ---- tabs
+    $tabs = New-Object Windows.Forms.TabControl; $tabs.Dock = 'Fill'
+    $tabInstall = New-Object Windows.Forms.TabPage; $tabInstall.Text = 'Install'
+    $tabUpdates = New-Object Windows.Forms.TabPage; $tabUpdates.Text = 'Updates'
+    [void]$tabs.TabPages.Add($tabInstall); [void]$tabs.TabPages.Add($tabUpdates)
+
+    # Install tab
+    $list = New-Object Windows.Forms.ListView
+    $list.View = 'Details'; $list.CheckBoxes = $true; $list.FullRowSelect = $true; $list.Dock = 'Fill'; $list.HideSelection = $false
+    [void]$list.Columns.Add('Mod', 330); [void]$list.Columns.Add('Source', 70); [void]$list.Columns.Add('Status', 150); [void]$list.Columns.Add('Detail', 470)
+    $rows = @{}
+    foreach ($bid in ($manifest.batches.Keys | Sort-Object)) {
+        $b = $manifest.batches[$bid]
+        [void]$list.Groups.Add((New-Object Windows.Forms.ListViewGroup("b$bid", "$bid. $($b.name)")))
+    }
+    foreach ($it in $manifest.items) {
+        $row = New-Object Windows.Forms.ListViewItem($it.name)
+        [void]$row.SubItems.Add($(if ($it.source -eq 'nexus') { 'Nexus' } else { 'mod.io' }))
+        $st = ''; $dt = ''; $done = $false
+        if ($state.ContainsKey($it.key)) { $st = $state[$it.key].status; $dt = $state[$it.key].detail; $done = $state[$it.key].done }
+        [void]$row.SubItems.Add($st); [void]$row.SubItems.Add($dt)
+        $row.Tag = $it.key
+        $row.Group = $list.Groups["b$($it.batch)"]
+        $row.Checked = (-not $it.optional) -and (-not $done)
+        if ($done) { $row.ForeColor = [Drawing.Color]::Gray }
+        [void]$list.Items.Add($row)
+        $rows[$it.key] = @{ row = $row; statusCol = 2; detailCol = 3 }
+    }
+    $bottom = New-Object Windows.Forms.FlowLayoutPanel
+    $bottom.Dock = 'Bottom'; $bottom.Height = 44; $bottom.Padding = New-Object Windows.Forms.Padding(4, 6, 4, 6)
+    $btnStart = New-Object Windows.Forms.Button; $btnStart.Text = 'Start'; $btnStart.Width = 110; $btnStart.Height = 30; $btnStart.Font = $bold
+    $btnPause = New-Object Windows.Forms.Button; $btnPause.Text = 'Pause'; $btnPause.Width = 90; $btnPause.Height = 30; $btnPause.Enabled = $false
+    $btnAll = New-Object Windows.Forms.Button; $btnAll.Text = 'Tick all'; $btnAll.Width = 90; $btnAll.Height = 30
+    $btnNone = New-Object Windows.Forms.Button; $btnNone.Text = 'Untick all'; $btnNone.Width = 90; $btnNone.Height = 30
+    $btnReset = New-Object Windows.Forms.Button; $btnReset.Text = 'Reset progress'; $btnReset.Width = 120; $btnReset.Height = 30
+    $chkPause = New-Object Windows.Forms.CheckBox; $chkPause.Text = 'Pause after each batch so I can test the game'; $chkPause.AutoSize = $true
+    $chkPause.Margin = New-Object Windows.Forms.Padding(16, 8, 0, 0); $chkPause.Checked = [bool]$config.pauseBetweenBatches
+    $bottom.Controls.AddRange(@($btnStart, $btnPause, $btnAll, $btnNone, $btnReset, $chkPause))
+    $tabInstall.Controls.Add($list); $tabInstall.Controls.Add($bottom)
+
+    # Updates tab
+    $updHeader = New-Object Windows.Forms.Label; $updHeader.Dock = 'Top'; $updHeader.Height = 50; $updHeader.Padding = New-Object Windows.Forms.Padding(6, 6, 6, 0)
+    $updList = New-Object Windows.Forms.ListView
+    $updList.View = 'Details'; $updList.CheckBoxes = $true; $updList.FullRowSelect = $true; $updList.Dock = 'Fill'; $updList.HideSelection = $false
+    [void]$updList.Columns.Add('Mod', 330); [void]$updList.Columns.Add('Source', 70); [void]$updList.Columns.Add('Installed', 110); [void]$updList.Columns.Add('Latest', 110); [void]$updList.Columns.Add('Status', 400)
+    $gFw = New-Object Windows.Forms.ListViewGroup('fw', 'Frameworks (update these first)')
+    $gNx = New-Object Windows.Forms.ListViewGroup('nx', 'Nexus mods (installed through Vortex)')
+    $gMo = New-Object Windows.Forms.ListViewGroup('mo', 'mod.io mods (the game updates these by itself)')
+    [void]$updList.Groups.AddRange(@($gFw, $gNx, $gMo))
+    $updBottom = New-Object Windows.Forms.FlowLayoutPanel
+    $updBottom.Dock = 'Bottom'; $updBottom.Height = 44; $updBottom.Padding = New-Object Windows.Forms.Padding(4, 6, 4, 6)
+    $btnCheck = New-Object Windows.Forms.Button; $btnCheck.Text = 'Check for updates'; $btnCheck.Width = 150; $btnCheck.Height = 30; $btnCheck.Font = $bold
+    $btnUpdate = New-Object Windows.Forms.Button; $btnUpdate.Text = 'Update ticked'; $btnUpdate.Width = 130; $btnUpdate.Height = 30; $btnUpdate.Enabled = $false
+    $btnAppUpd = New-Object Windows.Forms.Button; $btnAppUpd.Text = 'Update app'; $btnAppUpd.AutoSize = $true; $btnAppUpd.Height = 30; $btnAppUpd.Visible = $false
+    $chkAuto = New-Object Windows.Forms.CheckBox; $chkAuto.Text = 'Check for updates when the app opens'; $chkAuto.AutoSize = $true
+    $chkAuto.Margin = New-Object Windows.Forms.Padding(16, 8, 0, 0); $chkAuto.Checked = [bool]$config.checkOnStart
+    $updBottom.Controls.AddRange(@($btnCheck, $btnUpdate, $btnAppUpd, $chkAuto))
+    $tabUpdates.Controls.Add($updList); $tabUpdates.Controls.Add($updHeader); $tabUpdates.Controls.Add($updBottom)
+
+    # ---- log
+    $log = New-Object Windows.Forms.TextBox
+    $log.Multiline = $true; $log.ReadOnly = $true; $log.ScrollBars = 'Vertical'; $log.Dock = 'Bottom'; $log.Height = 130
+    $log.Font = New-Object Drawing.Font('Consolas', 9)
+
+    $form.Controls.Add($tabs); $form.Controls.Add($banner); $form.Controls.Add($top); $form.Controls.Add($log)
+
+    $engineRef = @{ E = $null; C = $null; AppUpdate = $null }
+
+    # ---- UI adapter used by the engine and the update checker
+    $ui = [pscustomobject]@{}
+    $ui | Add-Member ScriptMethod Log {
+        param($m)
+        $line = (Get-Date -Format 'HH:mm:ss') + '  ' + $m
+        $log.AppendText($line + [Environment]::NewLine)
+        try { Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8 } catch {}
+    }
+    $ui | Add-Member ScriptMethod SetStatus {
+        param($key, $status, $detail)
+        $entry = $rows[$key]; if (-not $entry) { return }
+        $r = $entry.row
+        $r.SubItems[$entry.statusCol].Text = $status
+        if ($entry.detailCol -ge 0) { $r.SubItems[$entry.detailCol].Text = $detail }
+        switch -Wildcard ($status) {
+            'Installed'   { $r.ForeColor = [Drawing.Color]::ForestGreen }
+            'Updated'     { $r.ForeColor = [Drawing.Color]::ForestGreen; $r.Checked = $false }
+            'Subscribed'  { $r.ForeColor = [Drawing.Color]::ForestGreen }
+            'Already*'    { $r.ForeColor = [Drawing.Color]::Gray }
+            'Up to date'  { $r.ForeColor = [Drawing.Color]::Gray; $r.Checked = $false }
+            'Skipped'     { $r.ForeColor = [Drawing.Color]::Gray }
+            'Failed'      { $r.ForeColor = [Drawing.Color]::Firebrick }
+            'Not found'   { $r.ForeColor = [Drawing.Color]::Firebrick }
+            default       { $r.ForeColor = [Drawing.Color]::DarkGoldenrod }
+        }
+        $r.EnsureVisible()
+    }
+    $ui | Add-Member ScriptMethod Banner {
+        param($text, $buttons)
+        $bannerText.Text = $text
+        $bannerBtns.Controls.Clear()
+        foreach ($b in @($buttons)) {
+            $btn = New-Object Windows.Forms.Button; $btn.Text = $b; $btn.AutoSize = $true; $btn.Height = 28
+            $btn.Add_Click({ param($s, $a) if ($s.Text -eq 'Update app') { & $doAppUpdate } elseif ($engineRef.E) { Invoke-EngineAction $engineRef.E $s.Text } })
+            $bannerBtns.Controls.Add($btn)
+        }
+        $banner.Visible = -not [string]::IsNullOrEmpty($text)
+    }
+    $ui | Add-Member ScriptMethod OpenUrl { param($u) Start-Process $u }
+    $ui | Add-Member ScriptMethod UpdateRow {
+        param($res)
+        $entry = $rows[$res.key]
+        if (-not $entry) {
+            $r = New-Object Windows.Forms.ListViewItem([string]$res.name)
+            [void]$r.SubItems.Add([string]$res.source); [void]$r.SubItems.Add(''); [void]$r.SubItems.Add(''); [void]$r.SubItems.Add('')
+            if ($res.source -eq 'mod.io') { $r.Group = $gMo } elseif ($res.framework) { $r.Group = $gFw } else { $r.Group = $gNx }
+            [void]$updList.Items.Add($r)
+            $entry = @{ row = $r; statusCol = 4; detailCol = -1 }
+            $rows[$res.key] = $entry
+            if ($res.source -eq 'Nexus') { $rows["update:$($res.id)"] = $entry }
+        }
+        $r = $entry.row
+        $r.Tag = $res
+        $r.SubItems[2].Text = [string]$res.installed; $r.SubItems[3].Text = [string]$res.latest; $r.SubItems[4].Text = [string]$res.status
+        $r.Checked = [bool]$res.update
+        if ($res.update) { $r.ForeColor = [Drawing.Color]::DarkOrange } elseif ($res.status -like 'Updated*') { $r.ForeColor = [Drawing.Color]::DarkOrange } else { $r.ForeColor = [Drawing.Color]::Gray }
+    }
+    $ui | Add-Member ScriptMethod CheckFinished {
+        param($n)
+        $btnCheck.Enabled = $true
+        $btnUpdate.Enabled = ($n -gt 0)
+        Update-UpdHeader
+        if ($n -gt 0) {
+            $ui.Log("Update check: $n Nexus mods have updates.")
+            if (-not $engineRef.E -or $engineRef.E.mode -in @('idle', 'done')) {
+                $ui.Banner("$n of your Nexus mods have updates. Open the Updates tab and click 'Update ticked'. Frameworks go first.", @())
+            }
+        } else { $ui.Log('Update check: everything is up to date.') }
+    }
+
+    function Update-AccountLabel {
+        $n = if ($config.nexusKey) { 'Nexus key saved' } else { 'No Nexus key (optional, needed for mod update checks)' }
+        $m = if ($config.modioToken) { 'mod.io token saved' } else { 'No mod.io token (needed for mod.io mods)' }
+        $g = if ($config.githubToken) { 'GitHub token saved' } else { 'App updates: public repo, no token needed' }
+        $lblAcct.Text = "$n  |  $m  |  $g"
+    }
+    function Update-UpdHeader {
+        $gv = Get-GameVersion $config.gameDir
+        $last = if ($state.ContainsKey('__lastCheck')) { $state['__lastCheck'].detail } else { 'never' }
+        $app = if ($engineRef.AppUpdate) { "App $($script:AppVersion), update to $($engineRef.AppUpdate.version) available" } else { "App $($script:AppVersion)" }
+        $updHeader.Text = "Game version: $(if ($gv) { $gv } else { 'unknown' })    |    $app    |    Last checked: $last" + [Environment]::NewLine + 'Ticked rows have a newer file on Nexus. Updating opens each file page in order; click "Slow download" and Vortex replaces the old version.'
+    }
+    function Show-Preflight {
+        $config.gameDir = $txtGame.Text.Trim()
+        $w = Get-PreflightWarnings $config
+        if ($w.Count -gt 0) { $ui.Banner(($w -join ' '), @()); return $false }
+        return $true
+    }
+    function Test-EngineBusy { return ($engineRef.E -and $engineRef.E.mode -notin @('idle', 'done', 'paused')) }
+
+    $doAppUpdate = {
+        if (-not $engineRef.AppUpdate) { return }
+        if (Test-EngineBusy) { $ui.Banner('Finish or pause the current install before updating the app.', @()); return }
+        try {
+            $ui.Log("Downloading app update $($engineRef.AppUpdate.version)...")
+            $backup = Install-AppUpdate $engineRef.AppUpdate $config.githubToken
+            $ui.Log("App updated. The previous version is saved in $backup. Restarting...")
+            Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', ('"' + (Join-Path $script:Root 'NightCityInstaller.ps1') + '"'))
+            $form.Close()
+        } catch { $ui.Banner('App update failed: ' + $_.Exception.Message, @()); $ui.Log('App update failed: ' + $_.Exception.Message) }
+    }
+    $checkApp = {
+        param([bool]$Quiet)
+        try {
+            $info = Test-AppUpdate $config.githubToken
+            $engineRef.AppUpdate = $info
+            if ($info) {
+                $btnAppUpd.Text = "Update app to $($info.version)"; $btnAppUpd.Visible = $true
+                $ui.Log("App update $($info.version) available: $($info.notes)")
+                if (-not (Test-EngineBusy)) { $ui.Banner("Night City Installer $($info.version) is available. $($info.notes)", @('Update app')) }
+            } elseif (-not $Quiet) { $ui.Log("The app is up to date ($($script:AppVersion)).") }
+        } catch { if (-not $Quiet) { $ui.Log('App update check: ' + $_.Exception.Message) } else { $ui.Log('App update check skipped: ' + $_.Exception.Message) } }
+        Update-UpdHeader
+    }
+    $startCheck = {
+        if (-not (Show-Preflight)) { return }
+        if ($engineRef.C -and -not $engineRef.C.done) { return }
+        $updList.Items.Clear()
+        foreach ($k in @($rows.Keys | Where-Object { $_ -like 'upd*' -or $_ -like 'update:*' })) { $rows.Remove($k) }
+        $btnCheck.Enabled = $false; $btnUpdate.Enabled = $false
+        $engineRef.C = New-UpdateChecker $config $state $ui
+        Start-UpdateCheck $engineRef.C
+        $ui.Log('Checking for mod updates...')
+        $chkTimer.Start()
+        & $checkApp $true
+    }
+
+    # ---- events
+    $chkPause.Add_CheckedChanged({ $config.pauseBetweenBatches = $chkPause.Checked; Save-Config $config })
+    $chkAuto.Add_CheckedChanged({ $config.checkOnStart = $chkAuto.Checked; Save-Config $config })
+
+    $btnBrowse.Add_Click({
+        $fb = New-Object Windows.Forms.FolderBrowserDialog
+        $fb.Description = 'Select your Cyberpunk 2077 folder'
+        if ($txtGame.Text -and (Test-Path -LiteralPath $txtGame.Text)) { $fb.SelectedPath = $txtGame.Text }
+        if ($fb.ShowDialog($form) -eq 'OK') { $txtGame.Text = $fb.SelectedPath; $config.gameDir = $fb.SelectedPath; Save-Config $config; [void](Show-Preflight); Update-UpdHeader }
+    })
+
+    $btnAccounts.Add_Click({
+        $dlg = New-Object Windows.Forms.Form
+        $dlg.Text = 'Accounts'; $dlg.Size = New-Object Drawing.Size(660, 520); $dlg.StartPosition = 'CenterParent'; $dlg.Font = $font; $dlg.FormBorderStyle = 'FixedDialog'
+        $t = New-Object Windows.Forms.TableLayoutPanel; $t.Dock = 'Fill'; $t.ColumnCount = 1; $t.Padding = New-Object Windows.Forms.Padding(12)
+        $mk = {
+            param($text, $linkText, $url)
+            $l = New-Object Windows.Forms.LinkLabel; $l.AutoSize = $true; $l.MaximumSize = New-Object Drawing.Size(610, 0); $l.Text = $text
+            $l.Links.Add($text.IndexOf($linkText), $linkText.Length, $url) | Out-Null
+            $l.Add_LinkClicked({ param($s, $a) Start-Process $a.Link.LinkData })
+            return $l
+        }
+        $l1 = & $mk 'Nexus personal API key (optional; needed to check Nexus mods for updates). Get it at next.nexusmods.com/settings/api-keys, under "Personal API Key".' 'next.nexusmods.com/settings/api-keys' 'https://next.nexusmods.com/settings/api-keys'
+        $k1 = New-Object Windows.Forms.TextBox; $k1.UseSystemPasswordChar = $true; $k1.Width = 610; $k1.Text = $config.nexusKey
+        $l2 = & $mk 'mod.io access token. Sign in with the same account you linked in the game, open mod.io/me/access, create an OAuth 2 client, then a token with Read and Write access.' 'mod.io/me/access' 'https://mod.io/me/access'
+        $k2 = New-Object Windows.Forms.TextBox; $k2.UseSystemPasswordChar = $true; $k2.Width = 610; $k2.Text = $config.modioToken
+        $l3 = & $mk 'GitHub token (optional). App updates come from the public repo github.com/Sirtacoburrito/NightCityInstaller and need no token. Only fill this in if that repo is ever made private.' 'github.com/Sirtacoburrito/NightCityInstaller' 'https://github.com/Sirtacoburrito/NightCityInstaller'
+        $k3 = New-Object Windows.Forms.TextBox; $k3.UseSystemPasswordChar = $true; $k3.Width = 610; $k3.Text = $config.githubToken
+        $res = New-Object Windows.Forms.Label; $res.AutoSize = $true; $res.MaximumSize = New-Object Drawing.Size(610, 0); $res.ForeColor = [Drawing.Color]::DimGray
+        $p = New-Object Windows.Forms.FlowLayoutPanel; $p.AutoSize = $true
+        $test = New-Object Windows.Forms.Button; $test.Text = 'Test'; $test.AutoSize = $true
+        $save = New-Object Windows.Forms.Button; $save.Text = 'Save'; $save.AutoSize = $true; $save.DialogResult = 'OK'
+        $p.Controls.AddRange(@($test, $save))
+        $t.Controls.AddRange(@($l1, $k1, $l2, $k2, $l3, $k3, $p, $res)); $dlg.Controls.Add($t)
+        $test.Add_Click({
+            $out = @()
+            if ($k1.Text.Trim()) {
+                try { $v = Invoke-Nexus 'users/validate.json' $k1.Text.Trim(); $out += "Nexus: signed in as $($v.name)" + $(if ($v.is_premium) { ' (Premium)' } else { ' (free)' }) }
+                catch { $out += 'Nexus: key rejected (' + $_.Exception.Message + ')' }
+            }
+            if ($k2.Text.Trim()) {
+                try { $me = Invoke-Modio Get 'me' $k2.Text.Trim(); $out += "mod.io: signed in as $($me.username)" }
+                catch { $out += 'mod.io: token rejected (' + $_.Exception.Message + ')' }
+            }
+            try {
+                $info = Test-AppUpdate $k3.Text.Trim()
+                $out += if ($info) { "GitHub: connected, app update $($info.version) available" } else { 'GitHub: connected, the app is up to date' }
+            } catch { $out += 'GitHub: ' + $_.Exception.Message }
+            $res.Text = ($out -join [Environment]::NewLine)
+        })
+        if ($dlg.ShowDialog($form) -eq 'OK') {
+            $config.nexusKey = $k1.Text.Trim(); $config.modioToken = $k2.Text.Trim(); $config.githubToken = $k3.Text.Trim()
+            if ($engineRef.E) { $engineRef.E.subscribed = $null }
+            Save-Config $config; Update-AccountLabel
+            $ui.Log('Accounts saved.')
+        }
+    })
+
+    $btnAll.Add_Click({ foreach ($r in $list.Items) { $r.Checked = $true } })
+    $btnNone.Add_Click({ foreach ($r in $list.Items) { $r.Checked = $false } })
+    $btnReset.Add_Click({
+        $a = [Windows.Forms.MessageBox]::Show('Clear all saved install progress? Mods already installed stay installed and are detected again.', $script:AppName, 'YesNo', 'Question')
+        if ($a -eq 'Yes') {
+            foreach ($k in @($state.Keys | Where-Object { $_ -notlike '__*' })) { $state.Remove($k) }
+            Save-State $state
+            foreach ($it in $manifest.items) { $r = $rows[$it.key].row; $r.SubItems[2].Text = ''; $r.SubItems[3].Text = ''; $r.ForeColor = [Drawing.Color]::Black; $r.Checked = -not $it.optional }
+            $ui.Log('Install progress cleared.')
+        }
+    })
+
+    $timer = New-Object Windows.Forms.Timer
+    $timer.Interval = 1500
+    $script:Busy = $false
+    $timer.Add_Tick({
+        if ($script:Busy -or -not $engineRef.E) { return }
+        $script:Busy = $true
+        try {
+            Step-Engine $engineRef.E
+            if ($engineRef.E.mode -in @('done', 'paused')) { $btnStart.Enabled = $true; $btnPause.Enabled = $false; $btnStart.Text = 'Start'; $btnUpdate.Enabled = $true }
+        } catch { $ui.Log('Error: ' + $_.Exception.Message) }
+        finally { $script:Busy = $false }
+    })
+
+    $chkTimer = New-Object Windows.Forms.Timer
+    $chkTimer.Interval = 250
+    $script:CheckBusy = $false
+    $chkTimer.Add_Tick({
+        if ($script:CheckBusy -or -not $engineRef.C) { return }
+        $script:CheckBusy = $true
+        try { Step-UpdateCheck $engineRef.C; if ($engineRef.C.done) { $chkTimer.Stop() } }
+        catch { $ui.Log('Update check error: ' + $_.Exception.Message); $chkTimer.Stop(); $btnCheck.Enabled = $true }
+        finally { $script:CheckBusy = $false }
+    })
+
+    $btnStart.Add_Click({
+        if (-not (Show-Preflight)) { return }
+        Save-Config $config
+        $checked = @($list.Items | Where-Object { $_.Checked } | ForEach-Object { [string]$_.Tag })
+        if ($engineRef.E -and $engineRef.E.mode -eq 'paused' -and $engineRef.E.pos -lt $engineRef.E.queue.Count) {
+            $engineRef.E.mode = 'running'; $engineRef.E.current = $null
+        } else {
+            $engineRef.E = New-Engine $manifest $config $state $ui
+            Start-Engine $engineRef.E $checked
+        }
+        if ($engineRef.E.mode -eq 'done') { return }
+        $ui.Banner('Working...', @())
+        $btnStart.Enabled = $false; $btnPause.Enabled = $true; $btnUpdate.Enabled = $false
+        $timer.Start()
+    })
+    $btnPause.Add_Click({
+        if ($engineRef.E) {
+            if ($engineRef.E.current -and $engineRef.E.mode -eq 'waitNexus') { $engineRef.E.current = $null }
+            $engineRef.E.mode = 'paused'
+        }
+        $ui.Banner('Paused. Click Start to carry on from where you stopped.', @())
+        $btnStart.Text = 'Continue'; $btnStart.Enabled = $true; $btnPause.Enabled = $false
+    })
+
+    $btnCheck.Add_Click({ & $startCheck })
+    $btnAppUpd.Add_Click({ & $doAppUpdate })
+    $btnUpdate.Add_Click({
+        if (Test-EngineBusy) { $ui.Banner('Finish or pause the current install first.', @()); return }
+        if (-not (Show-Preflight)) { return }
+        $picked = @($updList.Items | Where-Object { $_.Checked -and $_.Tag -and $_.Tag.update } | ForEach-Object { $_.Tag } | Sort-Object { Get-UpdateSortKey $_.id $_.name })
+        if ($picked.Count -eq 0) { $ui.Banner('Tick the mods you want to update first.', @()); return }
+        $engineRef.E = New-Engine $manifest $config $state $ui
+        Start-UpdateEngine $engineRef.E $picked
+        $btnUpdate.Enabled = $false; $btnStart.Enabled = $false; $btnPause.Enabled = $true
+        $tabs.SelectedTab = $tabUpdates
+        $timer.Start()
+    })
+
+    # ---- startup
+    Update-AccountLabel
+    Update-UpdHeader
+    $ui.Banner('First run: click Accounts... and add your mod.io token (and, ideally, your Nexus key). Then click Start. mod.io mods install with no further input. For each Nexus mod, click "Slow download" in the page that opens; Vortex does the rest and the app moves on by itself.', @())
+    $ui.Log("$($script:AppName) $($script:AppVersion). $($manifest.items.Count) mods in the list. Progress is saved in $($script:DataDir).")
+    if (Show-Preflight) {
+        $gv = Get-GameVersion $config.gameDir
+        $prev = if ($state.ContainsKey('__gameVersion')) { $state['__gameVersion'].detail } else { '' }
+        if ($gv -and $prev -and $gv -ne $prev) {
+            $ui.Banner("Cyberpunk 2077 was updated from $prev to $gv. Script mods often stop working after a game patch until their frameworks are updated. Open the Updates tab, check for updates and install the framework updates first. If the game won't start, disable mods in Vortex until they catch up.", @())
+            $ui.Log("Game version changed: $prev -> $gv")
+        }
+        if ($gv) { $state['__gameVersion'] = @{ status = ''; detail = $gv; done = $false }; Save-State $state }
+        if ($config.checkOnStart) { $form.Add_Shown({ & $startCheck }) }
+    }
+    [void]$form.ShowDialog()
+    $timer.Stop(); $chkTimer.Stop()
+}
+
+if (-not $TestMode) {
+    try { Start-App }
+    catch {
+        try { Ensure-DataDir; Add-Content -LiteralPath (Join-Path $script:DataDir 'log.txt') -Value ('Startup error: ' + $_.Exception.Message) } catch {}
+        Add-Type -AssemblyName System.Windows.Forms
+        [void][Windows.Forms.MessageBox]::Show("Night City Installer couldn't start: $($_.Exception.Message)", 'Night City Installer', 'OK', 'Error')
+    }
+}
