@@ -14,7 +14,7 @@ $script:TraceOn = ($env:NCI_DEBUG -eq '1') -or (Test-Path -LiteralPath (Join-Pat
 function Write-Trace([string]$m) { if ($script:TraceOn) { try { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'trace.txt') -Value ((Get-Date -Format 'HH:mm:ss.fff') + '  ' + $m) } catch {} } }
 Write-Trace 'script loaded'
 $script:AppName    = 'Night City Installer'
-$script:AppVersion = '1.5.0'
+$script:AppVersion = '1.5.1'
 $script:Root       = $PSScriptRoot
 $script:ScriptPath = $PSCommandPath
 $script:IsWin      = ($env:OS -eq 'Windows_NT')
@@ -1112,6 +1112,19 @@ function ConvertTo-PlainText([string]$Text) {
 
 # Finds required mods in a description or readme. Looks inside a "Requirements" section when
 # there is one; lines that say "optional", "not required" or "compatible" are ignored.
+# Nexus mod links inside a page's Requirements section (raw description, before tags are removed).
+function Get-RequirementLinksFromText([string]$Text, [int]$SelfId = 0) {
+    $t = [string]$Text
+    $m = [regex]::Match($t, '(?i)\b(requirements?|required|dependenc(y|ies)|prerequisites?)\b')
+    if (-not $m.Success) { return @() }
+    $seg = $t.Substring($m.Index, [Math]::Min(1500, $t.Length - $m.Index))
+    $stop = [regex]::Match($seg.Substring([Math]::Min(20, $seg.Length)), '(?i)\b(optional|recommended|installation|compatib|features|changelog|credits|known issues)\b')
+    if ($stop.Success) { $seg = $seg.Substring(0, $stop.Index + [Math]::Min(20, $seg.Length)) }
+    $ids = New-Object System.Collections.ArrayList
+    foreach ($x in [regex]::Matches($seg, '(?i)nexusmods\.com/cyberpunk2077/mods/(\d{1,6})')) { $id = [int]$x.Groups[1].Value; if ($id -ne $SelfId -and -not $ids.Contains($id)) { [void]$ids.Add($id) } }
+    return $ids.ToArray()
+}
+
 function Get-RequirementsFromText([string]$Text, [int]$SelfId = 0) {
     $plain = ConvertTo-PlainText $Text
     $lines = $plain -split "`r?`n"
@@ -1317,6 +1330,19 @@ function Invoke-PostInstallCheck($E, $Item) {
 }
 
 # Puts a required mod into the queue right after the current position.
+# Puts a required Nexus mod in the list (group "Requirements added automatically") and returns it.
+# It is a "verify" item: the installer only installs it if its newest file is from after the patch.
+function Add-RequirementItem($Manifest, [int]$Id, [string]$Name, [string]$Note) {
+    $key = "nexus:$Id"
+    $existing = $Manifest.items | Where-Object { $_.key -eq $key } | Select-Object -First 1
+    if ($existing) { return $existing }
+    if (-not $Manifest.batches.ContainsKey(94)) { $Manifest.batches[94] = [pscustomobject]@{ id = 94; name = 'Requirements added automatically'; source = 'nexus' } }
+    $it = [pscustomobject]@{ key = $key; kind = 'install'; order = @($Manifest.items).Count; batch = 94; source = 'nexus'; name = $Name; id = $Id
+        query = ''; exclude = ''; optional = $false; verify = $true; note = $Note; modioId = 0; discovered = $false }
+    [void]$Manifest.items.Add($it)
+    return $it
+}
+
 function Add-RequirementToQueue($E, $Req, $ForItem) {
     [void]$E.reqQueued.Add([int]$Req.id)
     $key = "nexus:$($Req.id)"
@@ -1800,29 +1826,63 @@ function Get-NexusRequirements([int]$ModId, [string]$Key) {
     return $c
 }
 
+$script:ModioSubNames = $null
+function Test-ModioHas([string]$Name) {
+    if (-not $script:ModioSubNames -or -not $Name) { return $false }
+    return $script:ModioSubNames.Contains((Normalize-Name $Name))
+}
+
 function Test-SameGameRequirement([string]$GameId) {
     return (-not $GameId -or $GameId -eq "$($script:CyberpunkNexusGameId)" -or $GameId -eq 'cyberpunk2077')
 }
 
-function Get-RequirementIssues([string]$GameDir, [string]$Key, $Log) {
+function Get-RequirementIssues([string]$GameDir, [string]$Key, $Log, $Report) {
     $issues = New-Object System.Collections.ArrayList
     if (-not $Key -or -not $GameDir) { return $issues.ToArray() }
     $installed = Get-InstalledNexusMods $GameDir
     $deployed = (Get-VortexInfo $GameDir).ids
     if ($installed.Count -eq 0) { return $issues.ToArray() }
-    $missing = @{}; $disabled = @{}; $dlcNeed = @{}; $failed = 0
+    $missing = @{}; $disabled = @{}; $maybe = @{}; $dlcNeed = @{}; $failed = 0
     Update-NexusRequirements @($installed.Values | Where-Object { $deployed.Contains([int]$_.id) } | ForEach-Object { [int]$_.id }) $Key
     foreach ($m in ($installed.Values | Sort-Object name)) {
         if (-not $deployed.Contains([int]$m.id)) { continue }   # Vortex only checks enabled mods
         try { $req = Get-NexusRequirements ([int]$m.id) $Key } catch { $failed++; continue }
-        foreach ($n in @($req.nodes)) {
+        # the description's "Requirements" section too (frameworks named there, and linked mods)
+        $pageNodes = @()
+        try {
+            $info = Get-NexusModInfo ([int]$m.id) $Key
+            if ($info -and $info.description) {
+                $pageNodes += @(@(Get-RequirementsFromText ([string]$info.description) ([int]$m.id)) | ForEach-Object { [pscustomobject]@{ modId = [string]$_.id; modName = [string]$_.name; gameId = ''; external = $false; notes = 'named in the description'; origin = 'page' } })
+                $pageNodes += @(@(Get-RequirementLinksFromText ([string]$info.description) ([int]$m.id)) | ForEach-Object { [pscustomobject]@{ modId = [string]$_; modName = ''; gameId = ''; external = $false; notes = 'linked in the description'; origin = 'page' } })
+            }
+        } catch {}
+        $listed = @(@($req.nodes) | Where-Object { $_ -and ([string]$_.notes) -notmatch '(?i)\boptional\b|not required|not needed|recommended|soft ?req|^\s*add-?on\b|\badd-?on\s*:|suggest|whatever you want|only (if|for|needed)|if you (want|use|have)|for compatibility|compatib(le|ility) (with|patch)' })
+        $listedIds = @($listed | ForEach-Object { [string]$_.modId })
+        $allNodes = @(@($listed | ForEach-Object { $_ | Add-Member NoteProperty origin 'nexus' -Force -PassThru }) + @($pageNodes | Where-Object { $listedIds -notcontains [string]$_.modId }))
+        if ($null -ne $Report) {
+            $names = @($allNodes | Where-Object { -not $_.external -and (Test-SameGameRequirement $_.gameId) } | ForEach-Object {
+                $rid = 0; [void][int]::TryParse([string]$_.modId, [ref]$rid)
+                $nm = [string]$_.modName
+                if (-not $nm -and $rid -gt 0) { $ci = (Get-ModInfoCache)["nexus:$rid"]; if ($ci) { $nm = [string]$ci.name } }
+                $st = if ($rid -le 0) { '?' } elseif ($deployed.Contains($rid) -or (Test-FrameworkInstalled $GameDir $rid $deployed)) { 'ok' } elseif ($nm -and (Test-ModioHas $nm)) { 'ok via mod.io' } elseif ($installed.ContainsKey($rid)) { 'DISABLED' } elseif ($_.origin -eq 'page') { 'maybe missing' } else { 'MISSING' }
+                "$(if ($nm) { $nm } else { "Nexus mod $rid" }) [$st]" } | Sort-Object -Unique)
+            [void]$Report.Add("  Nexus   $($m.name) ($($m.id)): " + $(if ($names.Count) { $names -join ', ' } else { 'no requirements listed' }))
+        }
+        foreach ($n in $allNodes) {
             if ($n.external -or -not (Test-SameGameRequirement $n.gameId)) { continue }
             $rid = 0; if (-not [int]::TryParse([string]$n.modId, [ref]$rid) -or $rid -le 0 -or $rid -eq [int]$m.id) { continue }
             $fw = $script:FrameworkFiles[$rid]
             if ($deployed.Contains($rid)) { continue }
             if ($fw -and (Test-Path -LiteralPath (Join-Path $GameDir $fw))) { continue }
-            $bucket = if ($installed.ContainsKey($rid)) { $disabled } else { $missing }
-            if (-not $bucket.ContainsKey($rid)) { $bucket[$rid] = [pscustomobject]@{ id = $rid; name = $(if ($n.modName) { $n.modName } else { "Nexus mod $rid" }); by = (New-Object System.Collections.ArrayList); notes = [string]$n.notes } }
+            if (Test-FrameworkInstalled $GameDir $rid $deployed) { continue }
+            if ($n.modName -and (Test-ModioHas ([string]$n.modName))) { continue }
+            $bucket = if ($installed.ContainsKey($rid)) { $disabled } elseif ($n.origin -eq 'page') { $maybe } else { $missing }
+            if (-not $bucket.ContainsKey($rid)) {
+                $rn = [string]$n.modName
+                if (-not $rn) { try { $rn = [string](Get-NexusModInfo $rid $Key).name } catch {} }
+                if (-not $rn) { $rn = "Nexus mod $rid" }
+                $bucket[$rid] = [pscustomobject]@{ id = $rid; name = $rn; by = (New-Object System.Collections.ArrayList); notes = [string]$n.notes }
+            }
             if (-not $bucket[$rid].by.Contains($m.name)) { [void]$bucket[$rid].by.Add($m.name) }
         }
         foreach ($d in @($req.dlc)) { if ($d) { if (-not $dlcNeed.ContainsKey($d)) { $dlcNeed[$d] = New-Object System.Collections.ArrayList }; [void]$dlcNeed[$d].Add($m.name) } }
@@ -1833,6 +1893,11 @@ function Get-RequirementIssues([string]$GameDir, [string]$Key, $Log) {
     foreach ($r in ($missing.Values | Sort-Object name)) {
         [void]$issues.Add([pscustomobject]@{ id = "req:$($r.id)"; level = 'error'; title = "Missing requirement: $($r.name)"
             detail = "Needed by $(@($r.by) -join ', '). Nexus lists it as a requirement and it isn't installed." + $(if ($r.notes) { " Author's note: $($r.notes)" } else { '' }) + ' Fix opens its download page; Vortex installs it.'; fix = "nexus-page:$($r.id)" })
+    }
+    foreach ($r in ($maybe.Values | Sort-Object name)) {
+        if ($r.name -and (Test-ModioHas $r.name)) { continue }
+        [void]$issues.Add([pscustomobject]@{ id = "reqhint:$($r.id)"; level = 'warning'; title = "Possibly missing: $($r.name)"
+            detail = "Mentioned near the Requirements part of the description of $(@($r.by) -join ', '), but not in their official requirement list, so it may be optional. Check the mod page; Download opens it."; fix = "nexus-page:$($r.id)" })
     }
     foreach ($r in ($disabled.Values | Sort-Object name)) {
         [void]$issues.Add([pscustomobject]@{ id = "reqoff:$($r.id)"; level = 'error'; title = "Requirement is disabled in Vortex: $($r.name)"
@@ -1846,6 +1911,197 @@ function Get-RequirementIssues([string]$GameDir, [string]$Key, $Log) {
     }
     if ($failed -gt 0 -and $Log) { $Log.Log("Requirement check: couldn't read $failed mods from Nexus this time.") }
     return $issues.ToArray()
+}
+
+# ---------------------------------------------------------------- full requirement audit
+# Covers every mod no matter where it came from:
+#  - Nexus mods (Vortex): the structured requirement list on each mod page (as Vortex reads it)
+#    plus the "Requirements" section of each page's description, including links to other mods.
+#  - mod.io mods: every subscribed mod's dependencies through the mod.io API.
+#  - Mods from anywhere else (installed by hand, other sites): what the files themselves use,
+#    e.g. scripts that call Codeware, .xl files (ArchiveXL), tweaks (TweakXL), CET Lua mods,
+#    RED4ext plugins, input files (Input Loader), REDmods (REDmod DLC).
+# Results are written to requirements-report.txt next to the app.
+
+$script:FrameworkNames = @{ 107 = 'Cyber Engine Tweaks'; 2380 = 'RED4ext'; 1511 = 'redscript'; 4198 = 'ArchiveXL'; 4197 = 'TweakXL'; 7780 = 'Codeware'
+    4575 = 'Input Loader'; 4885 = 'Mod Settings'; 3518 = 'Native Settings UI'; 12001 = 'Audioware'; 14139 = 'RedData'; 13378 = 'RedFileSystem'; 14192 = 'RedHttpClient'; 21422 = 'Native Interactions Framework' }
+
+# Script/file signatures: what a mod's files use, and the framework that provides it.
+$script:ContentRules = @(
+    @{ id = 1511;  kind = 'reds';  re = '' ;                                              why = 'redscript scripts (.reds)' },
+    @{ id = 7780;  kind = 'reds';  re = '\bimport\s+Codeware\b|\bCodeware\.' ;           why = 'its scripts use Codeware' },
+    @{ id = 4885;  kind = 'reds';  re = '@runtimeProperty\("ModSettings\.' ;              why = 'its settings use Mod Settings' },
+    @{ id = 13378; kind = 'reds';  re = '\bimport\s+RedFileSystem\b|\bFileSystemStorage\b' ; why = 'its scripts use RedFileSystem' },
+    @{ id = 14192; kind = 'reds';  re = '\bimport\s+RedHttpClient\b|\bAsyncHttpClient\b' ;   why = 'its scripts use RedHttpClient' },
+    @{ id = 14139; kind = 'reds';  re = '\bimport\s+RedData\.' ;                           why = 'its scripts use RedData' },
+    @{ id = 12001; kind = 'reds';  re = '\bimport\s+Audioware\b|\bAudioware\.' ;           why = 'its scripts use Audioware' },
+    @{ id = 4198;  kind = 'xl';    re = '' ;                                              why = 'it has ArchiveXL files (.xl)' },
+    @{ id = 4197;  kind = 'tweak'; re = '' ;                                              why = 'it has TweakXL tweaks (r6\tweaks)' },
+    @{ id = 107;   kind = 'cet';   re = '' ;                                              why = 'it is a Cyber Engine Tweaks (Lua) mod' },
+    @{ id = 3518;  kind = 'lua';   re = 'GetMod\(\s*["'']nativeSettings["'']\s*\)' ;    why = 'its menu uses Native Settings UI' },
+    @{ id = 2380;  kind = 'r4e';   re = '' ;                                              why = 'it is a RED4ext plugin' },
+    @{ id = 4575;  kind = 'input'; re = '' ;                                              why = 'it adds key bindings (r6\input)' }
+)
+
+function Test-FrameworkInstalled([string]$GameDir, [int]$Id, $DeployedIds) {
+    if ($DeployedIds -and $DeployedIds.Contains($Id)) { return $true }
+    $f = $script:FrameworkFiles[$Id]
+    if ($f -and (Test-Path -LiteralPath (Join-Path $GameDir $f))) { return $true }
+    if ($Id -eq 12001 -and (Test-Path -LiteralPath (Join-Path $GameDir 'red4ext\plugins\audioware'))) { return $true }
+    if ($Id -eq 14139 -and (Test-Path -LiteralPath (Join-Path $GameDir 'red4ext\plugins\RedData'))) { return $true }
+    if ($Id -eq 13378 -and (Test-Path -LiteralPath (Join-Path $GameDir 'red4ext\plugins\RedFileSystem'))) { return $true }
+    if ($Id -eq 14192 -and (Test-Path -LiteralPath (Join-Path $GameDir 'red4ext\plugins\RedHttpClient'))) { return $true }
+    return $false
+}
+
+# Which mod owns each mod file in the game folder: the Vortex mod, or (for files Vortex doesn't
+# know) the top-level folder/file it sits in, labelled "not in Vortex".
+function Get-ModFileOwners([string]$GameDir) {
+    $own = @{}
+    $d = Read-JsonFile (Join-Path $GameDir 'vortex.deployment.json')
+    if ($d -and $d.files) {
+        foreach ($f in $d.files) {
+            $src = [string]$f.source; $name = $src
+            $m = [regex]::Match($src, '^(?<name>.*?)\s(?<id>\d{2,6})\s\S+\s\d{4}-\d{2}-\d{2}T')
+            if ($m.Success) { $name = $m.Groups['name'].Value }
+            $own[(([string]$f.relPath) -replace '/', '\').ToLowerInvariant()] = $name
+        }
+    }
+    return $own
+}
+
+function Get-ContentRequirementIssues([string]$GameDir, $DeployedIds, $Report) {
+    $issues = New-Object System.Collections.ArrayList
+    if (-not $GameDir -or -not (Test-Path -LiteralPath $GameDir)) { return $issues.ToArray() }
+    $owners = Get-ModFileOwners $GameDir
+    $needs = @{}   # framework id -> mod name -> reason
+    $mods = @{}    # mod name -> source label
+    $add = {
+        param([int]$fid, [string]$mod, [string]$why)
+        if (-not $needs.ContainsKey($fid)) { $needs[$fid] = @{} }
+        if (-not $needs[$fid].ContainsKey($mod)) { $needs[$fid][$mod] = $why }
+    }
+    $ownerOf = {
+        param([string]$full, [string]$fallback)
+        $rel = $full.Substring($GameDir.TrimEnd('\', '/').Length).TrimStart('\', '/') -replace '/', '\'
+        $o = $owners[$rel.ToLowerInvariant()]
+        if ($o) { $mods[$o] = 'Vortex'; return $o }
+        $mods[$fallback] = 'not in Vortex'; return $fallback
+    }
+    $gd = $GameDir
+    # redscript
+    $rs = Join-Path $gd 'r6\scripts'
+    if (Test-Path -LiteralPath $rs) {
+        foreach ($f in (Get-ChildItem -LiteralPath $rs -Filter '*.reds' -File -Recurse -ErrorAction SilentlyContinue)) {
+            $top = ($f.FullName.Substring($rs.Length).TrimStart('\', '/') -split '[\\/]')[0]
+            $mod = & $ownerOf $f.FullName ("$top (r6\scripts)")
+            & $add 1511 $mod 'redscript scripts (.reds)'
+            $txt = ''; try { $txt = [IO.File]::ReadAllText($f.FullName) } catch {}
+            foreach ($r in ($script:ContentRules | Where-Object { $_.kind -eq 'reds' -and $_.re })) { if ($txt -match $r.re) { & $add $r.id $mod $r.why } }
+        }
+    }
+    # ArchiveXL files
+    $am = Join-Path $gd 'archive\pc\mod'
+    if (Test-Path -LiteralPath $am) {
+        foreach ($f in (Get-ChildItem -LiteralPath $am -Filter '*.xl' -File -Recurse -ErrorAction SilentlyContinue)) { & $add 4198 (& $ownerOf $f.FullName "$($f.Name) (archive\pc\mod)") 'it has ArchiveXL files (.xl)' }
+    }
+    # TweakXL
+    $tw = Join-Path $gd 'r6\tweaks'
+    if (Test-Path -LiteralPath $tw) {
+        foreach ($f in (Get-ChildItem -LiteralPath $tw -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.yaml', '.yml', '.tweak') })) {
+            $top = ($f.FullName.Substring($tw.Length).TrimStart('\', '/') -split '[\\/]')[0]
+            & $add 4197 (& $ownerOf $f.FullName "$top (r6\tweaks)") 'it has TweakXL tweaks (r6\tweaks)'
+        }
+    }
+    # CET mods
+    $cm = Join-Path $gd 'bin\x64\plugins\cyber_engine_tweaks\mods'
+    if (Test-Path -LiteralPath $cm) {
+        foreach ($dir in (Get-ChildItem -LiteralPath $cm -Directory -ErrorAction SilentlyContinue)) {
+            $init = Join-Path $dir.FullName 'init.lua'
+            if (-not (Test-Path -LiteralPath $init)) { continue }
+            $mod = & $ownerOf $init "$($dir.Name) (CET mod)"
+            & $add 107 $mod 'it is a Cyber Engine Tweaks (Lua) mod'
+            if ($dir.Name -ieq 'nativeSettings') { continue }
+            foreach ($lf in (Get-ChildItem -LiteralPath $dir.FullName -Filter '*.lua' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 60)) {
+                $txt = ''; try { $txt = [IO.File]::ReadAllText($lf.FullName) } catch {}
+                if ($txt -match (@($script:ContentRules | Where-Object { $_.kind -eq 'lua' })[0].re)) { & $add 3518 $mod 'its menu uses Native Settings UI'; break }
+            }
+        }
+    }
+    # RED4ext plugins
+    $rp = Join-Path $gd 'red4ext\plugins'
+    if (Test-Path -LiteralPath $rp) {
+        foreach ($f in (Get-ChildItem -LiteralPath $rp -Filter '*.dll' -File -Recurse -ErrorAction SilentlyContinue)) {
+            $top = ($f.FullName.Substring($rp.Length).TrimStart('\', '/') -split '[\\/]')[0]
+            & $add 2380 (& $ownerOf $f.FullName "$top (RED4ext plugin)") 'it is a RED4ext plugin'
+        }
+    }
+    # Input Loader
+    $ri = Join-Path $gd 'r6\input'
+    if (Test-Path -LiteralPath $ri) {
+        foreach ($f in (Get-ChildItem -LiteralPath $ri -Filter '*.xml' -File -Recurse -ErrorAction SilentlyContinue)) { & $add 4575 (& $ownerOf $f.FullName "$($f.Name) (r6\input)") 'it adds key bindings (r6\input)' }
+    }
+    foreach ($fid in ($needs.Keys | Sort-Object)) {
+        $ok = Test-FrameworkInstalled $GameDir ([int]$fid) $DeployedIds
+        $users = @($needs[$fid].Keys | Sort-Object)
+        if ($null -ne $Report) { [void]$Report.Add("  $(if ($ok) { 'OK     ' } else { 'MISSING' })  $($script:FrameworkNames[[int]$fid]) - used by $($users.Count) mod(s): $($users -join ', ')") }
+        if (-not $ok) {
+            [void]$issues.Add([pscustomobject]@{ id = "req:$fid"; level = 'error'; title = "Missing requirement: $($script:FrameworkNames[[int]$fid])"
+                detail = "Needed by $($users -join ', ') ($(@($needs[$fid].Values | Sort-Object -Unique) -join '; ')). It isn't installed. Fix opens its download page; Vortex installs it."; fix = "nexus-page:$fid" })
+        }
+    }
+    # REDmods need the REDmod DLC
+    $redmods = @(Get-ChildItem -LiteralPath (Join-Path $gd 'mods') -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'info.json') })
+    if ($redmods.Count -gt 0) {
+        $have = Test-Path -LiteralPath (Join-Path $gd 'tools\redmod\bin\redMod.exe')
+        if ($null -ne $Report) { [void]$Report.Add("  $(if ($have) { 'OK     ' } else { 'MISSING' })  REDmod DLC - used by $($redmods.Count) REDmod(s): $((@($redmods | ForEach-Object { $_.Name })) -join ', ')") }
+        if (-not $have) {
+            [void]$issues.Add([pscustomobject]@{ id = 'req:redmod'; level = 'error'; title = 'Missing requirement: REDmod DLC'
+                detail = "These REDmods need it: $((@($redmods | ForEach-Object { $_.Name })) -join ', '). Install the free REDmod DLC in Steam, or use each mod's archive version instead."; fix = '' })
+        }
+    }
+    return $issues.ToArray()
+}
+
+# Every subscribed mod.io mod's dependencies must be subscribed too (the game only downloads
+# what the account subscribes to). Missing ones can be subscribed automatically.
+function Get-ModioDependencyIssues($Cfg, $Report, $Log) {
+    $issues = New-Object System.Collections.ArrayList
+    if (-not $Cfg.modioToken -or -not $Cfg.modioGameId) { return $issues.ToArray() }
+    try {
+        $subs = @(Get-ModioSubscribedDetails $Cfg.modioGameId $Cfg.modioToken)
+        $script:ModioSubNames = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($s in $subs) { [void]$script:ModioSubNames.Add((Normalize-Name ([string]$s.name))) }
+        $ids = New-Object 'System.Collections.Generic.HashSet[int]'
+        foreach ($s in $subs) { [void]$ids.Add([int]$s.id) }
+        $cache = Get-RequirementCache
+        $now = [long]([datetimeoffset][datetime]::UtcNow).ToUnixTimeSeconds()
+        $missing = @{}
+        foreach ($s in $subs) {
+            $key = "modio:$($s.id)"; $c = $cache[$key]
+            if (-not $c -or ($now - [long]$c.fetched) -gt ($script:RequirementCacheHours * 3600)) {
+                $deps = @(Get-ModioDependencies ([int]$Cfg.modioGameId) ([int]$s.id) $Cfg.modioToken | ForEach-Object { [pscustomobject]@{ id = [int]$_.mod_id; name = [string]$_.name } })
+                $c = [pscustomobject]@{ fetched = $now; source = 'modio'; deps = $deps }
+                $cache[$key] = $c
+            }
+            $miss = @(@($c.deps) | Where-Object { $_ -and -not $ids.Contains([int]$_.id) })
+            if ($null -ne $Report) { [void]$Report.Add("  mod.io  $($s.name): " + $(if (@($c.deps).Count -eq 0) { 'no dependencies' } else { (@($c.deps | ForEach-Object { "$($_.name) [$(if ($ids.Contains([int]$_.id)) { 'subscribed' } else { 'MISSING' })]" })) -join ', ' })) }
+            foreach ($m in $miss) {
+                if (-not $missing.ContainsKey([int]$m.id)) { $missing[[int]$m.id] = [pscustomobject]@{ id = [int]$m.id; name = $(if ($m.name) { $m.name } else { "mod.io mod $($m.id)" }); by = (New-Object System.Collections.ArrayList) } }
+                [void]$missing[[int]$m.id].by.Add([string]$s.name)
+            }
+        }
+        Save-RequirementCache
+        foreach ($m in ($missing.Values | Sort-Object name)) {
+            [void]$issues.Add([pscustomobject]@{ id = "modiodep:$($m.id)"; level = 'error'; title = "Missing mod.io requirement: $($m.name)"
+                detail = "Needed by $(@($m.by) -join ', '). Fix subscribes it (no clicks needed); the game downloads it from its Mods menu."; fix = "modio-sub:$($m.id)" })
+        }
+    } catch { if ($Log) { $Log.Log('mod.io requirement check skipped: ' + $_.Exception.Message) } }
+    return $issues.ToArray()
+}
+
+function Write-RequirementsReport($Lines) {
+    try { Set-Content -LiteralPath (Join-Path $script:Root 'requirements-report.txt') -Value $Lines -Encoding UTF8 } catch {}
 }
 
 # ---------------------------------------------------------------- load order
@@ -2419,9 +2675,10 @@ function Start-App {
     $hTool = New-Object Windows.Forms.FlowLayoutPanel; $hTool.Dock = 'Top'; $hTool.Height = 44; $hTool.WrapContents = $false
     $btnHealth = New-DarkButton $T ([string][char]0x21BB + '  Run health check') 'primary'
     $btnFixAll = New-DarkButton $T 'Fix everything I can'
+    $btnReqInstall = New-DarkButton $T 'Install missing requirements'
     $chkAutoFix = New-Object Windows.Forms.CheckBox; $chkAutoFix.Text = 'Fix the start-up crash folder automatically'; $chkAutoFix.AutoSize = $true; $chkAutoFix.ForeColor = $T.muted; $chkAutoFix.Margin = New-Object Windows.Forms.Padding(14, 9, 0, 0); $chkAutoFix.Checked = [bool]$config.autoFix
-    foreach ($c in @($btnHealth, $btnFixAll)) { $c.Margin = New-Object Windows.Forms.Padding(0, 4, 8, 4) }
-    $hTool.Controls.AddRange(@($btnHealth, $btnFixAll, $chkAutoFix))
+    foreach ($c in @($btnHealth, $btnFixAll, $btnReqInstall)) { $c.Margin = New-Object Windows.Forms.Padding(0, 4, 8, 4) }
+    $hTool.Controls.AddRange(@($btnHealth, $btnFixAll, $btnReqInstall, $chkAutoFix))
     $hGrid = New-DarkGrid $T
     $colHLevel = Add-GridColumn $hGrid 'Level' 'Level' 100
     $null = Add-GridColumn $hGrid 'Problem' 'Problem' 300 'text' 35
@@ -2950,10 +3207,27 @@ function Start-App {
             $all = New-Object System.Collections.ArrayList
             foreach ($x in @(Get-HealthIssues $cfg.gameDir)) { [void]$all.Add($x) }
             foreach ($x in @(Get-ModioCheckIssues $cfg $mref $BgUi)) { [void]$all.Add($x) }
+            $rep = New-Object System.Collections.ArrayList
+            [void]$rep.Add("Requirement check $((Get-Date).ToString('yyyy-MM-dd HH:mm')) - every installed mod and what it needs")
+            [void]$rep.Add(''); [void]$rep.Add('Nexus mods (Vortex): requirement list on each mod page + the Requirements section of its description')
+            $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+            $mrep = New-Object System.Collections.ArrayList
+            $mio = @(Get-ModioDependencyIssues $cfg $mrep $BgUi)
             if ($cfg.nexusKey) {
-                try { foreach ($x in @(Get-RequirementIssues $cfg.gameDir $cfg.nexusKey $BgUi)) { [void]$all.Add($x) } }
-                catch { $BgUi.Log('Requirement check skipped: ' + $_.Exception.Message) }
-            }
+                try { foreach ($x in @(Get-RequirementIssues $cfg.gameDir $cfg.nexusKey $BgUi $rep)) { if ($seen.Add($x.id)) { [void]$all.Add($x) } } }
+                catch { $BgUi.Log('Nexus requirement check skipped: ' + $_.Exception.Message); [void]$rep.Add('  (skipped: ' + $_.Exception.Message + ')') }
+            } else { [void]$rep.Add('  (skipped: add your Nexus key in Settings)') }
+            [void]$rep.Add('  [MISSING] = in the mod page''s official requirement list; [maybe missing] = only mentioned in the description')
+            [void]$rep.Add(''); [void]$rep.Add('mod.io mods: dependencies of every subscribed mod')
+            foreach ($l in $mrep) { [void]$rep.Add($l) }
+            foreach ($x in $mio) { if ($seen.Add($x.id)) { [void]$all.Add($x) } }
+            [void]$rep.Add(''); [void]$rep.Add('All mods, wherever they came from: frameworks their files use')
+            try { foreach ($x in @(Get-ContentRequirementIssues $cfg.gameDir (Get-VortexInfo $cfg.gameDir).ids $rep)) { if ($seen.Add($x.id)) { [void]$all.Add($x) } } }
+            catch { [void]$rep.Add('  (skipped: ' + $_.Exception.Message + ')') }
+            $nmiss = @($all | Where-Object { $_.id -like 'req:*' -or $_.id -like 'reqoff:*' -or $_.id -like 'modiodep:*' }).Count
+            $nmaybe = @($all | Where-Object { $_.id -like 'reqhint:*' }).Count
+            [void]$rep.Add(''); [void]$rep.Add($(if ($nmiss) { "$nmiss missing requirement(s)" } else { 'No missing requirements' }) + $(if ($nmaybe) { ", $nmaybe possibly missing (only mentioned in descriptions)" } else { '' }) + ' - see the Health check page.')
+            Write-RequirementsReport $rep.ToArray()
             $model = $null
             try {
                 $model = Get-LoadOrderModel $cfg.gameDir
@@ -2991,6 +3265,12 @@ function Start-App {
             }
             elseif ($is.fix -like 'nexus-page:*') { Start-Process ("https://www.nexusmods.com/cyberpunk2077/mods/$($is.fix.Substring(11))?tab=files"); $ui.Log("Opened the download page for $($is.title -replace '^Missing requirement: ', ''). Click 'Slow download' (or 'Mod manager download'); Vortex installs it.") }
             elseif ($is.fix -eq 'open-loadorder') { & $showPage 'Load Order' }
+            elseif ($is.fix -like 'modio-sub:*') {
+                $mid = [int]$is.fix.Substring(10)
+                Add-ModioSubscription ([int]$config.modioGameId) $mid $config.modioToken
+                $ui.Log("mod.io: subscribed to $($is.title -replace '^Missing mod.io requirement: ', ''). The game downloads it from its Mods menu.")
+                & $refreshInstalled
+            }
             elseif ($is.fix -eq 'loadorder-apply') { & $loApply $true }
             elseif ($is.fix -eq 'steam-verify') { Start-Process 'steam://validate/1091500'; $ui.Log('Health: asked Steam to verify the Cyberpunk 2077 game files. Wait for it to finish (Steam > Downloads), then press Play.'); $ui.Banner('Steam is verifying the game files. When it finishes, press Play.', @()) }
             elseif ($is.fix -eq 'rename-modded') { if (Repair-EmptyModdedCache $config.gameDir) { $ui.Log('Health: renamed the empty r6\cache\modded folder.') } }
@@ -3003,6 +3283,37 @@ function Start-App {
     }
     $hGrid.Add_CellContentClick({ param($s, $e) if ($e.RowIndex -ge 0 -and $hGrid.Columns[$e.ColumnIndex].Name -eq 'Fix') { $is = $hGrid.Rows[$e.RowIndex].Tag; if ($is -and $is.fix) { & $applyFix $is; if ($is.fix -notlike 'nexus-page:*' -and $is.fix -ne 'open-loadorder') { & $runHealth } } } })
     $btnHealth.Add_Click({ & $runHealth })
+    # Queues every missing requirement from the mod pages' official lists (and missing frameworks)
+    # in the installer: mod.io ones are subscribed, Nexus ones open one by one for your
+    # "Slow download" click, and anything without a file for this game version waits.
+    $btnReqInstall.Add_Click({
+        if (& $engineBusy) { $ui.Banner('Finish or pause the current install first.', @()); return }
+        if (-not (& $preflight)) { & $showPage 'Settings'; return }
+        $keys = New-Object System.Collections.ArrayList
+        foreach ($is in @($healthRef.last)) {
+            if ($is.id -match '^modiodep:(\d+)$') { try { & $applyFix $is } catch {}; continue }
+            if ($is.id -notmatch '^req:(\d+)$') { continue }
+            $rid = [int]$Matches[1]
+            $nm = ([string]$is.title) -replace '^Missing requirement: ', ''
+            $note = ([string]$is.detail -split '\. ')[0]
+            $it = Add-RequirementItem $manifest $rid $nm $note
+            if (-not $rows.ContainsKey($it.key)) { & $addRow $it }
+            $rows[$it.key].row.Cells['Q'].Value = $true
+            [void]$keys.Add($it.key)
+        }
+        & $updateSummary
+        if ($keys.Count -eq 0) { $ui.Log('No missing requirements to install.'); return }
+        $ui.Log("Installing $($keys.Count) missing requirement(s). Each is checked for a file made for this game version first.")
+        Save-Config $config
+        $engineRef.E = New-Engine $manifest $config $state $ui
+        $engineRef.E.updates = $updatesById
+        Start-Engine $engineRef.E @($keys)
+        if ($engineRef.E.mode -eq 'done') { return }
+        & $showPage 'Mods'
+        $ui.Banner('Working...', @())
+        $btnStart.Enabled = $false; $btnPause.Enabled = $true; $btnUpdate.Enabled = $false
+        $timer.Start()
+    })
     # "Fix everything" only runs the fixes that need no decision from you (no browser pages, no Steam verify).
     $btnFixAll.Add_Click({ foreach ($is in @($healthRef.last)) { if ($is.fix -and $is.fix -notlike 'nexus-page:*' -and $is.fix -notin @('open-loadorder', 'steam-verify')) { & $applyFix $is } }; & $runHealth })
     $hGrid.Add_CellFormatting({ param($s, $e)

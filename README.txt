@@ -141,6 +141,16 @@ HEALTH CHECK (sidebar)
     deployed it asks Nexus for that mod's listed requirements and reports any that aren't
     installed ("Download" opens its page), installed but disabled in Vortex, or DLC it needs.
     Frameworks installed by hand (CET, RED4ext, redscript, ArchiveXL, TweakXL, Codeware...) count.
+    It also reads the Requirements section of each mod page's description (frameworks it names
+    and mods it links). Those only count as "possibly missing", since descriptions often link
+    optional mods. Requirements whose author note says optional/soft/add-on are skipped.
+  - mod.io: every subscribed mod's dependencies must be subscribed too (Fix subscribes them).
+  - Mods from anywhere else (installed by hand, other sites): what their files use, e.g. scripts
+    calling Codeware or Mod Settings, .xl files (ArchiveXL), tweaks (TweakXL), Lua mods (CET),
+    RED4ext plugins, key bindings (Input Loader) and REDmods (REDmod DLC).
+  - Everything is listed per mod in requirements-report.txt in the app folder.
+  - "Install missing requirements" queues them all: mod.io ones are subscribed, Nexus ones open
+    one by one for your Slow download click, and any without a file for this game version wait.
     Results are cached for 12 hours.
   - Load order problems: a modlist.txt that is missing new archives, archives that overwrite
     each other, and damaged archive files.

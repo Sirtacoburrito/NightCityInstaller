@@ -1,10 +1,10 @@
 {
-  "version": "1.5.0",
-  "notes": "Faster start: everything slow runs in the background. Silent app updates (installed when you close the app). Vortex-style Health Check for missing requirements. New Load Order page with conflict detection, auto-sort and modlist.txt, plus REDmod ordering like Vortex.",
+  "version": "1.5.1",
+  "notes": "Full requirement audit for every mod: Nexus requirement lists and description requirements, mod.io dependencies, and frameworks used by mods from any site. Per-mod requirements-report.txt and an Install missing requirements button.",
   "files": [
     {
       "path": "NightCityInstaller.ps1",
-      "sha256": "82169D67E75B1E8111292463F9FF490844BAC684991D3F3CCD94AE47ED97D35C"
+      "sha256": "A6221F4B7E64C058BCD7E8A8524D0DDB0FC8534EFE0FE7728BC2B432FC903397"
     },
     {
       "path": "manifest.json",
@@ -12,7 +12,7 @@
     },
     {
       "path": "README.txt",
-      "sha256": "22C90E5921BD91EBF51E313E0DF95CFAF9916BBB7FA907B48391A52D4249DACD"
+      "sha256": "E1B57C1B18A8DD4D237507687EB4D4DC015738BE6441B7AEB4FE8CA3CCBA7A05"
     },
     {
       "path": "Start Night City Installer.bat",

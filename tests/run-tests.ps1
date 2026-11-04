@@ -795,5 +795,52 @@ Remove-Item function:Invoke-RestMethod
 
 Remove-Item $tmp -Recurse -Force
 
+# ================= 1.5.1 tests: requirement audit for every mod source =================
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ("ncl-151-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory $tmp | Out-Null
+$script:DataDir = Join-Path $tmp 'data'; New-Item -ItemType Directory $script:DataDir | Out-Null
+$script:ReqCache = $null; $script:ModInfoCache = $null
+$g = Join-Path $tmp 'game'
+function MkF([string]$rel, [string]$txt = 'x') { $p = Join-Path $g $rel; New-Item -ItemType Directory (Split-Path $p) -Force | Out-Null; Set-Content -LiteralPath $p -Value $txt }
+MkF 'r6/scripts/HandMod/a.reds' "import Codeware.*`n@runtimeProperty(`"ModSettings.mod`", `"X`")`nfunc A() {}"
+MkF 'r6/tweaks/HandTweak/t.yaml' 'a: 1'
+MkF 'archive/pc/mod/hand.archive.xl' 'resource:'
+MkF 'bin/x64/plugins/cyber_engine_tweaks/mods/HandCet/init.lua' 'local ns = GetMod("nativeSettings")'
+MkF 'red4ext/plugins/HandPlugin/hand.dll' 'MZ'
+MkF 'r6/input/hand.xml' '<bindings/>'
+MkF 'mods/HandRedmod/info.json' '{ "name": "HandRedmod" }'
+$rep = New-Object System.Collections.ArrayList
+$ci = @(Get-ContentRequirementIssues $g (New-Object 'System.Collections.Generic.HashSet[int]') $rep)
+$ids = @($ci | ForEach-Object id)
+foreach ($want in @('req:1511', 'req:7780', 'req:4885', 'req:4197', 'req:4198', 'req:107', 'req:3518', 'req:2380', 'req:4575', 'req:redmod')) {
+    Check "content check finds $want" ($ids -contains $want) ($ids -join ',')
+}
+Check 'content check names the mod that needs it' (@($ci | Where-Object { $_.id -eq 'req:7780' -and $_.detail -match 'HandMod' }).Count -eq 1)
+MkF 'red4ext/plugins/Codeware/Codeware.dll' 'MZ'
+MkF 'bin/x64/plugins/cyber_engine_tweaks.asi' 'MZ'
+$ci2 = @(Get-ContentRequirementIssues $g (New-Object 'System.Collections.Generic.HashSet[int]') $null)
+Check 'frameworks installed by hand count as installed' (-not (@($ci2 | ForEach-Object id) -contains 'req:7780') -and -not (@($ci2 | ForEach-Object id) -contains 'req:107'))
+Check 'report lists every framework' ($rep.Count -ge 10 -and ($rep -join "`n") -match 'MISSING  Codeware')
+
+$desc = 'Great mod.<br>Requirements:<br>[url=https://www.nexusmods.com/cyberpunk2077/mods/1234]Lib[/url]<br>[url=https://www.nexusmods.com/cyberpunk2077/mods/555]Self[/url]<br>Optional:<br>https://www.nexusmods.com/cyberpunk2077/mods/999'
+Check 'linked requirements read from the description' ((@(Get-RequirementLinksFromText $desc 555) -join ',') -eq '1234') (@(Get-RequirementLinksFromText $desc 555) -join ',')
+
+$script:ModioBase = 'https://api.mod.io/v1'
+function Invoke-RestMethod {
+    param($Method = 'Get', $Uri, $Headers, $ContentType, $Body, $TimeoutSec)
+    $u = [string]$Uri
+    if ($u -like '*me/subscribed*') { return [pscustomobject]@{ data = @([pscustomobject]@{ id = 1; name = 'Quest A' }, [pscustomobject]@{ id = 2; name = 'Core' }) } }
+    if ($u -like '*mods/1/dependencies*') { return [pscustomobject]@{ data = @([pscustomobject]@{ mod_id = 2; name = 'Core' }, [pscustomobject]@{ mod_id = 3; name = 'Missing Core Lib' }) } }
+    if ($u -like '*/dependencies*') { return [pscustomobject]@{ data = @() } }
+    throw "unexpected $u"
+}
+$mrep = New-Object System.Collections.ArrayList
+$mi = @(Get-ModioDependencyIssues @{ modioToken = 'T'; modioGameId = 5784 } $mrep $null)
+Check 'mod.io missing dependency found' (@($mi | Where-Object { $_.id -eq 'modiodep:3' -and $_.fix -eq 'modio-sub:3' -and $_.detail -match 'Quest A' }).Count -eq 1) (($mi | ForEach-Object id) -join ',')
+Check 'mod.io subscribed dependency not flagged' (@($mi | Where-Object { $_.id -eq 'modiodep:2' }).Count -eq 0)
+Check 'mod.io report lists dependencies' (($mrep -join "`n") -match 'Quest A: Core \[subscribed\], Missing Core Lib \[MISSING\]')
+Remove-Item function:Invoke-RestMethod
+Remove-Item $tmp -Recurse -Force
+
 Write-Host "TOTAL passed $pass, failed $fail"
 if ($fail -gt 0) { exit 1 }
