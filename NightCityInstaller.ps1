@@ -10,8 +10,10 @@
 param([switch]$TestMode)
 
 $ErrorActionPreference = 'Stop'
+function Write-Trace([string]$m) { if ($env:NCI_DEBUG -eq '1') { try { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'trace.txt') -Value ((Get-Date -Format 'HH:mm:ss.fff') + '  ' + $m) } catch {} } }
+Write-Trace 'script loaded'
 $script:AppName    = 'Night City Installer'
-$script:AppVersion = '1.3.0'
+$script:AppVersion = '1.4.0'
 $script:Root       = $PSScriptRoot
 $script:IsWin      = ($env:OS -eq 'Windows_NT')
 if ($env:LOCALAPPDATA) { $script:DataDir = Join-Path $env:LOCALAPPDATA 'NightCityInstaller' }
@@ -60,11 +62,13 @@ function Write-JsonFile([string]$Path, $Object) {
 
 function Load-Config {
     $c = Read-JsonFile (Join-Path $script:DataDir 'config.json')
-    $cfg = @{ gameDir = ''; nexusKey = ''; modioToken = ''; githubToken = ''; modioGameId = 0; pauseBetweenBatches = $false; checkOnStart = $true; modioApiPath = ''; discoverOnStart = $true }
+    $cfg = @{ gameDir = ''; nexusKey = ''; modioToken = ''; githubToken = ''; modioGameId = 0; pauseBetweenBatches = $false; checkOnStart = $true; modioApiPath = ''; discoverOnStart = $true; autoFix = $true; shortcutDone = $false }
     if ($c) {
         if ($c.PSObject.Properties['pauseBetweenBatches']) { $cfg.pauseBetweenBatches = [bool]$c.pauseBetweenBatches }
         if ($c.PSObject.Properties['checkOnStart']) { $cfg.checkOnStart = [bool]$c.checkOnStart }
         if ($c.PSObject.Properties['discoverOnStart']) { $cfg.discoverOnStart = [bool]$c.discoverOnStart }
+        if ($c.PSObject.Properties['autoFix']) { $cfg.autoFix = [bool]$c.autoFix }
+        if ($c.PSObject.Properties['shortcutDone']) { $cfg.shortcutDone = [bool]$c.shortcutDone }
         if ($c.PSObject.Properties['modioApiPath'] -and $c.modioApiPath) { $cfg.modioApiPath = [string]$c.modioApiPath }
         if ($c.PSObject.Properties['githubToken'] -and $c.githubToken) { $cfg.githubToken = Unprotect-Text ([string]$c.githubToken) }
         if ($c.gameDir)     { $cfg.gameDir = [string]$c.gameDir }
@@ -81,7 +85,7 @@ function Save-Config($cfg) {
     Write-JsonFile (Join-Path $script:DataDir 'config.json') ([ordered]@{
         gameDir = $cfg.gameDir; nexusKey = (Protect-Text $cfg.nexusKey); modioToken = (Protect-Text $cfg.modioToken); modioGameId = $cfg.modioGameId
         pauseBetweenBatches = [bool]$cfg.pauseBetweenBatches; checkOnStart = [bool]$cfg.checkOnStart; githubToken = (Protect-Text $cfg.githubToken)
-        modioApiPath = [string]$cfg.modioApiPath; discoverOnStart = [bool]$cfg.discoverOnStart })
+        modioApiPath = [string]$cfg.modioApiPath; discoverOnStart = [bool]$cfg.discoverOnStart; autoFix = [bool]$cfg.autoFix; shortcutDone = [bool]$cfg.shortcutDone })
     Set-ModioBase $cfg.modioApiPath
 }
 
@@ -105,7 +109,7 @@ function Load-Manifest([string]$Path) {
         $null = $items.Add([pscustomobject]@{
             key = $key; kind = 'install'; order = $order; batch = [int]$x.batch; source = [string]$x.source; name = [string]$x.name
             id = if ($x.id) { [int]$x.id } else { 0 }; query = [string]$x.query; exclude = [string]$x.exclude
-            optional = [bool]$x.optional; verify = [bool]$x.verify; note = [string]$x.note; modioId = 0; discovered = $false })
+            optional = [bool]$x.optional; verify = [bool]$x.verify; note = [string]$x.note; modioId = 0; discovered = $false; desc = [string]$x.desc })
         $order++
     }
     $batches = @{}
@@ -290,8 +294,9 @@ function Get-ModioTokenKind([string]$Token) {
     return 'pat'
 }
 
-function Invoke-Modio([string]$Method, [string]$Path, [string]$Token) {
-    $h = @{ Authorization = "Bearer $(([string]$Token).Trim())"; Accept = 'application/json'; 'X-Modio-Platform' = 'windows' }
+function Invoke-Modio([string]$Method, [string]$Path, [string]$Token, [switch]$AnyPlatform) {
+    $h = @{ Authorization = "Bearer $(([string]$Token).Trim())"; Accept = 'application/json' }
+    if (-not $AnyPlatform) { $h['X-Modio-Platform'] = 'windows' }
     if ($Method -eq 'Post') {
         return Invoke-RestMethod -Method Post -Uri "$($script:ModioBase)/$Path" -Headers $h -ContentType 'application/x-www-form-urlencoded' -Body '' -TimeoutSec 30
     }
@@ -299,6 +304,18 @@ function Invoke-Modio([string]$Method, [string]$Path, [string]$Token) {
 }
 
 function UrlEnc([string]$s) { return [Uri]::EscapeDataString($s) }
+
+# Windows PowerShell 5.1 returns a JSON array from Invoke-RestMethod as ONE object (the array
+# itself) instead of its items. Wrapping that in @() gives an array inside an array. This helper
+# always returns the plain list of items, on 5.1 and 7 alike.
+function ConvertTo-FlatList($x) {
+    $out = New-Object System.Collections.ArrayList
+    foreach ($i in @($x)) {
+        if ($i -is [System.Array]) { foreach ($j in $i) { if ($null -ne $j) { [void]$out.Add($j) } } }
+        elseif ($null -ne $i) { [void]$out.Add($i) }
+    }
+    return ,$out.ToArray()
+}
 
 # ---------------------------------------------------------------- Nexus logic
 
@@ -380,8 +397,8 @@ function Get-ModioSubscribed([int]$GameId, [string]$Token) {
     return ,$set
 }
 
-function Search-Modio([int]$GameId, [string]$Query, [string]$Token) {
-    $r = Invoke-Modio Get "games/$GameId/mods?_q=$(UrlEnc $Query)&_limit=30" $Token
+function Search-Modio([int]$GameId, [string]$Query, [string]$Token, [switch]$AnyPlatform) {
+    $r = Invoke-Modio Get "games/$GameId/mods?_q=$(UrlEnc $Query)&_limit=30" $Token -AnyPlatform:$AnyPlatform
     return @($r.data)
 }
 
@@ -462,6 +479,7 @@ function New-Engine($Manifest, $Config, $State, $UI) {
     return [pscustomobject]@{
         manifest = $Manifest; config = $Config; state = $State; ui = $UI
         queue = @(); pos = 0; mode = 'idle'; current = $null; purpose = 'install'; modioNoted = $false; updates = @{}
+        reqQueued = (New-Object 'System.Collections.Generic.HashSet[int]')
         currentBatch = 0; workInBatch = 0; lastSource = ''
         waitStart = [datetime]::MinValue; reminded = $false; sleepUntil = [datetime]::MinValue
         installed = $null; subscribed = $null
@@ -613,6 +631,7 @@ function Step-Engine($E) {
                 $verb = if ($E.current.kind -eq 'update') { 'Updated' } else { 'Installed' }
                 Set-ItemState $E $E.current $verb "$verb by Vortex" $true
                 $E.ui.Log("${verb}: $($E.current.name)")
+                try { $doneItem = $E.current; $E.pos++; Invoke-PostInstallCheck $E $doneItem; $E.pos-- } catch { $E.ui.Log("Post-install check for $($E.current.name) failed: " + $_.Exception.Message) }
                 Complete-Item $E 'installed'
             } elseif (-not $E.reminded -and ($now - $E.waitStart).TotalMinutes -ge 10) {
                 $E.reminded = $true
@@ -634,6 +653,7 @@ function Step-Engine($E) {
     if ($E.pos -ge $E.queue.Count) {
         $E.mode = 'done'
         $c = $E.counts
+        try { if (Repair-EmptyModdedCache $E.config.gameDir) { $E.ui.Log('Health: renamed an empty r6\cache\modded folder that would crash the game on start-up.') } } catch {}
         $E.ui.Banner("Finished. Installed $($c.installed) from Nexus, subscribed to $($c.subscribed) on mod.io, $($c.already) were already in place, $($c.skipped) skipped, $($c.failed) failed. Start the game once more so it downloads the last mod.io subscriptions.", @())
         $E.ui.Log('All done.')
         return
@@ -708,6 +728,28 @@ function Step-Nexus($E, $item) {
         return
     }
     if ($E.config.nexusKey) {
+        # Install whatever this mod needs first.
+        $info = $null
+        try { $info = Get-NexusModInfo $item.id $E.config.nexusKey } catch {}
+        if ($info) {
+            $missing = @(Get-RequirementsFromText ([string]$info.description) $item.id | Where-Object { -not $ids.Contains([int]$_.id) })
+            if ($missing.Count -gt 0) {
+                $tried = @($missing | Where-Object { $E.reqQueued.Contains([int]$_.id) })
+                if ($tried.Count -gt 0) {
+                    $names = ($tried | ForEach-Object { $_.name }) -join ', '
+                    Set-ItemState $E $item "Needs $names" "Waiting for its requirement $names (no 2.5 file yet, skipped, or not installed)" $false
+                    $E.ui.Log("Held back $($item.name): it needs $names, which isn't installed.")
+                    Complete-Item $E 'skipped'
+                    return
+                }
+                foreach ($req in $missing) {
+                    $E.ui.Log("$($item.name) needs $($req.name). Installing that first.")
+                    Add-RequirementToQueue $E $req $item
+                }
+                $E.current = $null
+                return
+            }
+        }
         $files = Invoke-Nexus "games/$($E.manifest.game)/mods/$($item.id)/files.json" $E.config.nexusKey
         $sel = Select-NexusMainFile $files $E.manifest.patchDate
         if (-not $sel) {
@@ -762,6 +804,15 @@ function Step-Modio($E, $item) {
         $mod = Select-MostPopular $sel.choices
         $others = @($sel.choices | Where-Object { $_.id -ne $mod.id } | ForEach-Object { $_.name }) -join '; '
         $E.ui.Log("Several matches for '$($item.query)'. Picked the most downloaded: '$($mod.name)'. Others: $others")
+    }
+    if (-not $mod -and -not $item.modioId) {
+        # Not offered for PC? Look again without the platform filter.
+        $any = Select-ModioMatch (Search-Modio $gid $item.query $tok -AnyPlatform) $item.query $item.exclude
+        if ($any.match -or $any.choices.Count -gt 0) {
+            Set-ItemState $E $item 'Console only' 'mod.io offers this mod for consoles only, so PC skips it' $true
+            $E.ui.Log("Console only (skipped on PC): $($item.name)")
+            Complete-Item $E 'skipped'; return
+        }
     }
     if (-not $mod) {
         Set-ItemState $E $item 'Not found' "No mod.io match for '$($item.query)'. It may have been removed from the catalog." $false
@@ -821,6 +872,315 @@ function Get-InstallSnapshot($Manifest, [string]$GameDir, $ModioSubs) {
         }
     }
     return $snap
+}
+
+# ---------------------------------------------------------------- health checks
+# Problems that stop the game from starting, found in the game folder. Each has an id, a level
+# (error / warning / info), a title, a detail line and, when the app can fix it, a fix id.
+
+function Get-HealthIssues([string]$GameDir) {
+    $issues = New-Object System.Collections.ArrayList
+    $sccMsg = $null
+    if (-not $GameDir -or -not (Test-Path -LiteralPath $GameDir)) { return $issues }
+    $modded = Join-Path $GameDir 'r6\cache\modded'
+    if ((Test-Path -LiteralPath $modded) -and -not (Get-ChildItem -LiteralPath $modded -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+        [void]$issues.Add([pscustomobject]@{ id = 'empty-modded-cache'; level = 'error'; title = 'Empty REDmod script cache folder'
+            detail = 'r6\cache\modded exists but is empty. The script compiler then fails ("Failed to load the original script cache") and the game crashes on start-up.'; fix = 'rename-modded' })
+    }
+    $logDir = Join-Path $GameDir 'red4ext\logs'
+    $last = Get-ChildItem -LiteralPath $logDir -Filter 'red4ext-*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($last) {
+        $m = Select-String -LiteralPath $last.FullName -Pattern 'scc invocation failed with an error: (.+)$' | Select-Object -Last 1
+        if ($m) {
+            $sccMsg = $m.Matches[0].Groups[1].Value.Trim()
+            [void]$issues.Add([pscustomobject]@{ id = 'scc-failed'; level = 'error'; title = 'Mod scripts failed to compile on the last launch'
+                detail = "Last launch $($last.LastWriteTime.ToString('MMM d, h:mm tt')): $sccMsg. The game usually crashes after this. Fix anything else listed here, then press Play; this clears once a launch compiles cleanly."; fix = '' })
+        }
+    }
+    $rs = Join-Path $GameDir 'r6\logs\redscript_rCURRENT.log'
+    if ((Test-Path -LiteralPath $rs) -and -not ($sccMsg -and (Select-String -LiteralPath $rs -SimpleMatch $sccMsg -Quiet))) {
+        $errs = @(Select-String -LiteralPath $rs -Pattern '^\[ERROR' | Select-Object -First 3)
+        if ($errs.Count -gt 0) {
+            [void]$issues.Add([pscustomobject]@{ id = 'redscript-errors'; level = 'error'; title = 'Script errors in the last compile'
+                detail = (($errs | ForEach-Object { ($_.Line -replace '^\[ERROR - [^\]]*\]\s*', '') }) -join ' | '); fix = '' })
+        }
+    }
+    $extra = Join-Path $GameDir 'V2077\mod-extra-files'
+    if (Test-Path -LiteralPath $extra) {
+        foreach ($d in (Get-ChildItem -LiteralPath $extra -Directory -ErrorAction SilentlyContinue)) {
+            $plan = Get-ManualInstallPlan $d.FullName $d.Name
+            if ($plan.copy.Count -gt 0) {
+                [void]$issues.Add([pscustomobject]@{ id = "extra:$($d.Name)"; level = 'warning'; title = "Vortex couldn't place some files of $($d.Name)"
+                    detail = "$($plan.copy.Count) game files are parked in V2077\mod-extra-files. The app can put them where they belong."; fix = "manual:$($d.Name)" })
+            }
+            if ($plan.redmod) {
+                [void]$issues.Add([pscustomobject]@{ id = "redmod:$($d.Name)"; level = 'warning'; title = "$($d.Name) is a REDmod mod"
+                    detail = 'It needs the free REDmod DLC (Steam > Cyberpunk 2077 > DLC) and Vortex REDmod deployment.'; fix = '' })
+            }
+        }
+    }
+    return $issues
+}
+
+# Safe, reversible fix for the crash: rename the empty folder (never delete anything).
+function Repair-EmptyModdedCache([string]$GameDir) {
+    $modded = Join-Path $GameDir 'r6\cache\modded'
+    if (-not (Test-Path -LiteralPath $modded)) { return $false }
+    if (Get-ChildItem -LiteralPath $modded -Force -ErrorAction SilentlyContinue | Select-Object -First 1) { return $false }
+    $target = Join-Path $GameDir ('r6\cache\_modded_empty_' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    Rename-Item -LiteralPath $modded -NewName (Split-Path $target -Leaf)
+    return $true
+}
+
+# ---------------------------------------------------------------- requirements
+# Mods name what they need in their description (usually under a "Requirements" heading) or readme.
+# The app knows these frameworks and libraries by name and Nexus id.
+
+$script:KnownRequirements = @(
+    @{ id = 107;   name = 'Cyber Engine Tweaks';            re = 'cyber ?engine ?tweaks|\bCET\b' },
+    @{ id = 2380;  name = 'RED4ext';                        re = 'red4ext' },
+    @{ id = 1511;  name = 'redscript';                      re = '\bredscript\b' },
+    @{ id = 4198;  name = 'ArchiveXL';                      re = 'archive ?xl' },
+    @{ id = 4197;  name = 'TweakXL';                        re = 'tweak ?xl' },
+    @{ id = 7780;  name = 'Codeware';                       re = 'codeware' },
+    @{ id = 4575;  name = 'Input Loader';                   re = 'input ?loader' },
+    @{ id = 4885;  name = 'Mod Settings';                   re = '\bmod settings\b' },
+    @{ id = 3518;  name = 'Native Settings UI';             re = 'native ?settings' },
+    @{ id = 21422; name = 'Native Interactions Framework';  re = 'native interactions' },
+    @{ id = 12001; name = 'Audioware';                      re = 'audioware' },
+    @{ id = 13077; name = 'Trigger Mode Control';           re = 'trigger mode control' },
+    @{ id = 26764; name = 'Radial Menu Upgrade';            re = 'radial menu upgrade' },
+    @{ id = 14139; name = 'RedData';                        re = '\bred ?data\b' },
+    @{ id = 13378; name = 'RedFileSystem';                  re = 'red ?file ?system' },
+    @{ id = 14192; name = 'RedHttpClient';                  re = 'red ?http ?client' },
+    @{ id = 9429;  name = 'Cyberware-EX';                   re = 'cyberware-?ex\b' },
+    @{ id = 6945;  name = 'Equipment-EX';                   re = 'equipment-?ex\b' },
+    @{ id = 2987;  name = 'Virtual Atelier';                re = 'virtual atelier' },
+    @{ id = 4591;  name = 'RadioExt';                       re = 'radio ?ext\b' },
+    @{ id = 790;   name = 'Appearance Menu Mod';            re = 'appearance menu mod|\bAMM\b' }
+)
+
+function ConvertTo-PlainText([string]$Text) {
+    $t = [string]$Text
+    $t = $t -replace '(?i)<br\s*/?>', "`n" -replace '(?i)\[/?(b|i|u|s|center|right|left|size|color|font|quote|spoiler|url|img|youtube|heading|line|list|\*)[^\]]*\]', ' '
+    $t = $t -replace '<[^>]+>', ' ' -replace '&nbsp;', ' ' -replace '&amp;', '&' -replace '&lt;', '<' -replace '&gt;', '>' -replace '&quot;', '"' -replace '&#39;', "'"
+    return ($t -replace '[ \t]+', ' ')
+}
+
+# Finds required mods in a description or readme. Looks inside a "Requirements" section when
+# there is one; lines that say "optional", "not required" or "compatible" are ignored.
+function Get-RequirementsFromText([string]$Text, [int]$SelfId = 0) {
+    $plain = ConvertTo-PlainText $Text
+    $lines = $plain -split "`r?`n"
+    $start = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '(?i)\b(requirements?|required|dependenc(y|ies)|prerequisites?|needs?)\b|\u524d\u7f6e|\u4f9d\u8d56') { $start = $i; break } }
+    if ($start -lt 0) { return @() }
+    $section = New-Object System.Collections.ArrayList
+    for ($i = $start; $i -lt [Math]::Min($lines.Count, $start + 25); $i++) {
+        $l = $lines[$i]
+        if ($i -gt $start + 1 -and $l -match '(?i)^\s*(installation|install|features?|description|changelog|compatib|credits|known issues|how to|uninstall|\u529f\u80fd|\u5378\u8f7d|\u70ed\u952e)\b') { break }
+        if ($l -match '(?i)optional|not required|not needed|compatible with|works with|no longer|\u4e0d\u9700\u8981') { continue }
+        [void]$section.Add($l)
+    }
+    $text2 = $section -join "`n"
+    $found = New-Object System.Collections.ArrayList
+    foreach ($r in $script:KnownRequirements) {
+        if ($r.id -ne $SelfId -and $text2 -imatch $r.re) { [void]$found.Add([pscustomobject]@{ id = $r.id; name = $r.name }) }
+    }
+    return $found.ToArray()   # items go down the pipeline one by one; callers wrap in @()
+}
+
+# ---------------------------------------------------------------- mod details (description, photos)
+$script:ModInfoCache = $null
+function Get-ModInfoCache {
+    if ($null -eq $script:ModInfoCache) {
+        $script:ModInfoCache = @{}
+        $d = Read-JsonFile (Join-Path $script:DataDir 'modinfo.json')
+        if ($d) { foreach ($p in $d.PSObject.Properties) { $script:ModInfoCache[$p.Name] = $p.Value } }
+    }
+    return $script:ModInfoCache
+}
+function Save-ModInfoCache { Write-JsonFile (Join-Path $script:DataDir 'modinfo.json') (Get-ModInfoCache) }
+
+function Get-NexusModInfo([int]$Id, [string]$Key, [switch]$Refresh) {
+    $c = Get-ModInfoCache; $k = "nexus:$Id"
+    $now = [long]([datetimeoffset][datetime]::UtcNow).ToUnixTimeSeconds()
+    if (-not $Refresh -and $c.ContainsKey($k) -and ($now - [long]$c[$k].fetched) -lt 259200) { return $c[$k] }
+    if (-not $Key) { if ($c.ContainsKey($k)) { return $c[$k] } else { return $null } }
+    $o = Invoke-Nexus "games/cyberpunk2077/mods/$Id.json" $Key
+    $desc = [string]$o.description; if ($desc.Length -gt 20000) { $desc = $desc.Substring(0, 20000) }
+    $info = [pscustomobject]@{ source = 'nexus'; id = $Id; name = [string]$o.name; summary = (ConvertTo-PlainText ([string]$o.summary)).Trim(); description = $desc
+        author = [string]$o.author; version = [string]$o.version; endorsements = [int]$o.endorsement_count; downloads = [int]$o.mod_downloads
+        images = @([string]$o.picture_url | Where-Object { $_ }); adult = [bool]$o.contains_adult_content
+        url = "https://www.nexusmods.com/cyberpunk2077/mods/$Id"; gallery = "https://www.nexusmods.com/cyberpunk2077/mods/$Id`?tab=images"; fetched = $now }
+    $c[$k] = $info; Save-ModInfoCache
+    return $info
+}
+
+function Get-ModioModInfo([int]$GameId, [int]$ModId, [string]$Token, [switch]$Refresh) {
+    $c = Get-ModInfoCache; $k = "modio:$ModId"
+    $now = [long]([datetimeoffset][datetime]::UtcNow).ToUnixTimeSeconds()
+    if (-not $Refresh -and $c.ContainsKey($k) -and ($now - [long]$c[$k].fetched) -lt 259200) { return $c[$k] }
+    if (-not $Token) { if ($c.ContainsKey($k)) { return $c[$k] } else { return $null } }
+    $o = Invoke-Modio Get "games/$GameId/mods/$ModId" $Token -AnyPlatform
+    $imgs = New-Object System.Collections.ArrayList
+    try { if ($o.logo.thumb_640x360) { [void]$imgs.Add([string]$o.logo.thumb_640x360) } } catch {}
+    try { foreach ($im in @($o.media.images)) { $u = if ($im.thumb_1280x720) { $im.thumb_1280x720 } elseif ($im.original) { $im.original } else { $im.thumb_320x180 }; if ($u -and $imgs.Count -lt 6) { [void]$imgs.Add([string]$u) } } } catch {}
+    $desc = [string]$o.description_plaintext; if (-not $desc) { $desc = [string]$o.description }
+    $info = [pscustomobject]@{ source = 'modio'; id = $ModId; name = [string]$o.name; summary = [string]$o.summary; description = $desc
+        author = [string]$o.submitted_by.username; version = $(try { [string]$o.modfile.version } catch { '' }); endorsements = $(try { [int]$o.stats.ratings_positive } catch { 0 }); downloads = $(try { [int]$o.stats.downloads_total } catch { 0 })
+        images = @($imgs); adult = $(try { [int]$o.maturity_option -gt 0 } catch { $false }); url = [string]$o.profile_url; gallery = [string]$o.profile_url; fetched = $now }
+    $c[$k] = $info; Save-ModInfoCache
+    return $info
+}
+
+# Downloads an image once into the app's cache folder and returns the local path.
+function Get-CachedImage([string]$Url) {
+    if (-not $Url) { return $null }
+    $dir = Join-Path $script:DataDir 'img'
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $sha = [Security.Cryptography.SHA1]::Create()
+    $name = (($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Url)) | ForEach-Object { $_.ToString('x2') }) -join '') + '.img'
+    $path = Join-Path $dir $name
+    if (-not (Test-Path -LiteralPath $path)) {
+        # Windows Forms can't show WebP, so ask the CDN for JPEG/PNG first.
+        Invoke-WebRequest -Uri $Url -OutFile $path -UseBasicParsing -TimeoutSec 30 -Headers @{ 'User-Agent' = 'NightCityInstaller'; 'Accept' = 'image/jpeg,image/png,image/gif;q=0.9,*/*;q=0.1' } | Out-Null
+    }
+    return $path
+}
+
+# Turns downloaded image bytes into a System.Drawing image. JPEG/PNG/GIF/BMP load directly. WebP
+# (what the Nexus CDN often sends) goes through the Windows Imaging Component codec via WPF and is
+# re-encoded as PNG; the PNG is cached next to the original so this only happens once per picture.
+function ConvertTo-DrawingImage([string]$Path) {
+    $png = $Path + '.png'
+    if (Test-Path -LiteralPath $png) { return [Drawing.Image]::FromStream((New-Object IO.MemoryStream (, [IO.File]::ReadAllBytes($png)))) }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $isWebp = $bytes.Length -gt 12 -and [Text.Encoding]::ASCII.GetString($bytes, 8, 4) -eq 'WEBP'
+    if (-not $isWebp) { return [Drawing.Image]::FromStream((New-Object IO.MemoryStream (, $bytes))) }
+    Add-Type -AssemblyName PresentationCore, WindowsBase
+    $in = New-Object IO.MemoryStream (, $bytes)
+    $dec = [Windows.Media.Imaging.BitmapDecoder]::Create($in, [Windows.Media.Imaging.BitmapCreateOptions]::None, [Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
+    $enc = New-Object Windows.Media.Imaging.PngBitmapEncoder
+    $enc.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($dec.Frames[0]))
+    $out = New-Object IO.MemoryStream; $enc.Save($out)
+    $pngBytes = $out.ToArray()
+    try { [IO.File]::WriteAllBytes($png, $pngBytes) } catch {}
+    return [Drawing.Image]::FromStream((New-Object IO.MemoryStream (, $pngBytes)))
+}
+
+# ---------------------------------------------------------------- manual installs
+# Vortex parks files it can't place in V2077\mod-extra-files\<mod>. The app puts them where the
+# standard Cyberpunk layout says they go and records every file it adds so it can remove them.
+
+$script:GameRoots = @('archive/pc/mod', 'bin/x64', 'r6/scripts', 'r6/tweaks', 'r6/config', 'red4ext/plugins', 'engine/config', 'engine/tools', 'mods')
+$script:DocExt = @('.txt', '.md', '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.url', '.html', '.htm', '.rtf', '.docx')
+
+function Get-ManualInstallPlan([string]$Dir, [string]$ModName) {
+    $safe = ($ModName -replace '[^A-Za-z0-9 ._-]', '').Trim(); if (-not $safe) { $safe = 'ManualMod' }
+    $copy = New-Object System.Collections.ArrayList; $docs = New-Object System.Collections.ArrayList; $unknown = New-Object System.Collections.ArrayList
+    $redmod = $false
+    $files = @(Get-ChildItem -LiteralPath $Dir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne '__folder_managed_by_vortex' })
+    $cetRoots = @($files | Where-Object { $_.Name -eq 'init.lua' } | ForEach-Object { $_.DirectoryName })
+    foreach ($f in $files) {
+        $rel = $f.FullName.Substring($Dir.Length).TrimStart('\', '/') -replace '\\', '/'
+        $low = $rel.ToLowerInvariant()
+        $ext = $f.Extension.ToLowerInvariant()
+        $dest = $null
+        foreach ($root in $script:GameRoots) {
+            $ix = $low.IndexOf($root + '/')
+            if ($low.StartsWith($root + '/')) { $ix = 0 }
+            elseif ($ix -gt 0 -and $low[$ix - 1] -ne '/') { $ix = -1 }
+            if ($ix -ge 0) { $dest = $rel.Substring($ix); if ($root -eq 'mods') { $redmod = $true }; break }
+        }
+        if (-not $dest) {
+            if ($f.Name -eq 'info.json' -and (Test-Path -LiteralPath (Join-Path $f.DirectoryName 'archives'))) { $redmod = $true; continue }
+            $cet = $cetRoots | Where-Object { $f.DirectoryName.StartsWith($_) } | Select-Object -First 1
+            if ($cet) { $dest = 'bin/x64/plugins/cyber_engine_tweaks/mods/' + (Split-Path $cet -Leaf) + ($f.FullName.Substring($cet.Length) -replace '\\', '/') }
+            elseif ($ext -in @('.archive', '.xl')) { $dest = 'archive/pc/mod/' + $f.Name }
+            elseif ($ext -eq '.reds') { $dest = "r6/scripts/$safe/" + $f.Name }
+            elseif ($ext -in @('.yaml', '.yml', '.tweak')) { $dest = "r6/tweaks/$safe/" + $f.Name }
+            elseif ($ext -in $script:DocExt) { [void]$docs.Add($f.FullName); continue }
+            else { [void]$unknown.Add($rel); continue }
+        }
+        [void]$copy.Add([pscustomobject]@{ src = $f.FullName; dest = $dest })
+    }
+    return [pscustomobject]@{ copy = @($copy); docs = @($docs); unknown = @($unknown); redmod = $redmod }
+}
+
+function Invoke-ManualInstall([string]$GameDir, $Plan, [string]$Key) {
+    $done = New-Object System.Collections.ArrayList; $skipped = New-Object System.Collections.ArrayList
+    foreach ($c in $Plan.copy) {
+        if ($c.dest -match '\.\.') { continue }
+        $target = Join-Path $GameDir ($c.dest -replace '/', '\')
+        if (Test-Path -LiteralPath $target) { [void]$skipped.Add($c.dest); continue }   # never overwrite what Vortex placed
+        $dir = Split-Path $target -Parent
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        Copy-Item -LiteralPath $c.src -Destination $target
+        [void]$done.Add($c.dest)
+    }
+    $recPath = Join-Path $script:DataDir 'manual-installs.json'
+    $rec = @{}; $r = Read-JsonFile $recPath
+    if ($r) { foreach ($p in $r.PSObject.Properties) { $rec[$p.Name] = @($p.Value) } }
+    $rec[$Key] = @(@($rec[$Key]) + @($done) | Where-Object { $_ } | Select-Object -Unique)
+    Write-JsonFile $recPath $rec
+    return [pscustomobject]@{ copied = @($done); skipped = @($skipped) }
+}
+
+function Get-ExtraFilesFolder([string]$GameDir, [string]$ModName, [int]$NexusId) {
+    $extra = Join-Path $GameDir 'V2077\mod-extra-files'
+    if (-not (Test-Path -LiteralPath $extra)) { return $null }
+    $want = Normalize-Name $ModName
+    foreach ($d in (Get-ChildItem -LiteralPath $extra -Directory -ErrorAction SilentlyContinue)) {
+        $n = Normalize-Name $d.Name
+        if ($n -and ($n -eq $want -or ($want -and ($n.StartsWith($want) -or $want.StartsWith($n))) -or ($NexusId -and $d.Name -match "(^|\D)$NexusId(\D|$)"))) { return $d.FullName }
+    }
+    return $null
+}
+
+# After Vortex installs a mod: place any files it parked, read the readme for requirements.
+function Invoke-PostInstallCheck($E, $Item) {
+    $mods = Get-InstalledNexusMods $E.config.gameDir
+    $vname = if ($mods.ContainsKey([int]$Item.id)) { $mods[[int]$Item.id].name } else { $Item.name }
+    $dir = Get-ExtraFilesFolder $E.config.gameDir $vname $Item.id
+    if (-not $dir) { $dir = Get-ExtraFilesFolder $E.config.gameDir $Item.name $Item.id }
+    if (-not $dir) { return }
+    $plan = Get-ManualInstallPlan $dir (Split-Path $dir -Leaf)
+    if ($plan.copy.Count -gt 0) {
+        $res = Invoke-ManualInstall $E.config.gameDir $plan $Item.key
+        $E.ui.Log("Manual install for $($Item.name): placed $($res.copied.Count) files Vortex couldn't" + $(if ($res.skipped.Count) { ", left $($res.skipped.Count) that already existed" } else { '' }) + '.')
+    }
+    if ($plan.redmod) { $E.ui.Log("$($Item.name) is a REDmod mod: it needs the free REDmod DLC from Steam to work.") }
+    foreach ($doc in @($plan.docs | Where-Object { $_ -match '\.(txt|md)$' })) {
+        $txt = Get-Content -LiteralPath $doc -Raw -ErrorAction SilentlyContinue
+        $c = Get-ModInfoCache
+        if ($c.ContainsKey($Item.key)) { $c[$Item.key] | Add-Member -NotePropertyName readme -NotePropertyValue $txt -Force }
+        else { $c["readme:$($Item.key)"] = [pscustomobject]@{ readme = $txt } }
+        Save-ModInfoCache
+        foreach ($req in (Get-RequirementsFromText $txt $Item.id)) {
+            if (-not $mods.ContainsKey([int]$req.id) -and -not $E.reqQueued.Contains([int]$req.id)) {
+                $E.ui.Log("$($Item.name)'s readme says it needs $($req.name). Adding it next.")
+                Add-RequirementToQueue $E $req $Item
+            }
+        }
+    }
+}
+
+# Puts a required mod into the queue right after the current position.
+function Add-RequirementToQueue($E, $Req, $ForItem) {
+    [void]$E.reqQueued.Add([int]$Req.id)
+    $key = "nexus:$($Req.id)"
+    $existing = $E.manifest.items | Where-Object { $_.key -eq $key } | Select-Object -First 1
+    if (-not $existing) {
+        if (-not $E.manifest.batches.ContainsKey(94)) { $E.manifest.batches[94] = [pscustomobject]@{ id = 94; name = 'Requirements added automatically'; source = 'nexus' } }
+        $existing = [pscustomobject]@{ key = $key; kind = 'install'; order = @($E.manifest.items).Count; batch = 94; source = 'nexus'; name = $Req.name; id = [int]$Req.id
+            query = ''; exclude = ''; optional = $false; verify = $true; note = "Required by $($ForItem.name)"; modioId = 0; discovered = $false }
+        [void]$E.manifest.items.Add($existing)
+        if ($E.ui.PSObject.Methods['AddItem']) { $E.ui.AddItem($existing) }
+    }
+    $head = @($E.queue | Select-Object -First $E.pos)
+    $tail = @($E.queue | Select-Object -Skip $E.pos)
+    $E.queue = @($head) + @($existing) + @($tail)
 }
 
 # ---------------------------------------------------------------- discovery
@@ -899,13 +1259,13 @@ function Step-Discovery($D) {
             $key = $D.config.nexusKey
             $cands = @{}
             try {
-                foreach ($u in @(Invoke-Nexus "games/$game/mods/updated.json?period=1m" $key)) {
+                foreach ($u in (ConvertTo-FlatList (Invoke-Nexus "games/$game/mods/updated.json?period=1m" $key))) {
                     if ([long]$u.latest_file_update -ge $D.patchTs) { $cands[[int]$u.mod_id] = [long]$u.latest_file_update }
                 }
             } catch { $D.ui.Log('Discovery: Nexus update feed failed: ' + $_.Exception.Message) }
             foreach ($feed in 'trending', 'latest_added', 'latest_updated') {
                 try {
-                    foreach ($o in @(Invoke-Nexus "games/$game/mods/$feed.json" $key)) {
+                    foreach ($o in (ConvertTo-FlatList (Invoke-Nexus "games/$game/mods/$feed.json" $key))) {
                         $id = [int]$o.mod_id
                         if ($D.store.nexus.ContainsKey("$id") -or $D.installed.Contains($id) -or (Test-InManifest $D.manifest "nexus:$id")) { continue }
                         $fts = if ($cands.ContainsKey($id)) { $cands[$id] } else { 0 }
@@ -1017,182 +1377,415 @@ function Get-PreflightWarnings($Config) {
 }
 
 # ---------------------------------------------------------------- GUI
+# Dark, Vortex-style layout: sidebar navigation with a Play button, a mods table with status
+# badges and filters, and a details pane with the mod's description, photos and requirements.
+
+function New-Rgb([int]$r, [int]$g, [int]$b) { return [Drawing.Color]::FromArgb($r, $g, $b) }
+
+function Get-Theme {
+    return @{
+        bg = (New-Rgb 24 25 29); panel = (New-Rgb 32 33 38); panel2 = (New-Rgb 41 42 48); sidebar = (New-Rgb 16 17 20)
+        border = (New-Rgb 54 55 62); text = (New-Rgb 232 232 236); muted = (New-Rgb 150 152 162); hover = (New-Rgb 52 53 60)
+        accent = (New-Rgb 217 143 64); accentText = (New-Rgb 20 20 22); select = (New-Rgb 56 58 70)
+        yellow = (New-Rgb 242 230 0); cyan = (New-Rgb 0 232 255)
+        banner = (New-Rgb 58 50 22); bannerText = (New-Rgb 255 236 170)
+    }
+}
+
+function Show-Splash($T, [string]$Logo) {
+    $f = New-Object Windows.Forms.Form
+    $f.FormBorderStyle = 'None'; $f.StartPosition = 'CenterScreen'; $f.Size = New-Object Drawing.Size(520, 300)
+    $f.BackColor = $T.sidebar; $f.ShowInTaskbar = $true; $f.TopMost = $true; $f.Text = 'Night City Installer'
+    if (Test-Path -LiteralPath $Logo) {
+        $pb = New-Object Windows.Forms.PictureBox; $pb.Size = New-Object Drawing.Size(96, 96); $pb.Location = New-Object Drawing.Point(212, 34)
+        $pb.SizeMode = 'Zoom'; $pb.Image = [Drawing.Image]::FromStream((New-Object IO.MemoryStream (, [IO.File]::ReadAllBytes($Logo))))
+        $f.Controls.Add($pb)
+    }
+    $t1 = New-Object Windows.Forms.Label; $t1.Text = 'NIGHT CITY INSTALLER'; $t1.ForeColor = $T.yellow; $t1.Font = New-Object Drawing.Font('Segoe UI Semibold', 18)
+    $t1.AutoSize = $false; $t1.TextAlign = 'MiddleCenter'; $t1.Bounds = New-Object Drawing.Rectangle(0, 140, 520, 36)
+    $t2 = New-Object Windows.Forms.Label; $t2.Text = "Cyberpunk 2077 mod manager  |  version $($script:AppVersion)"; $t2.ForeColor = $T.muted; $t2.Font = New-Object Drawing.Font('Segoe UI', 9.5)
+    $t2.AutoSize = $false; $t2.TextAlign = 'MiddleCenter'; $t2.Bounds = New-Object Drawing.Rectangle(0, 176, 520, 22)
+    $st = New-Object Windows.Forms.Label; $st.Text = 'Starting...'; $st.ForeColor = $T.text; $st.Font = New-Object Drawing.Font('Segoe UI', 9)
+    $st.AutoSize = $false; $st.TextAlign = 'MiddleCenter'; $st.Bounds = New-Object Drawing.Rectangle(0, 222, 520, 22)
+    $track = New-Object Windows.Forms.Panel; $track.Bounds = New-Object Drawing.Rectangle(60, 256, 400, 4); $track.BackColor = $T.panel2
+    $bar = New-Object Windows.Forms.Panel; $bar.Bounds = New-Object Drawing.Rectangle(0, 0, 90, 4); $bar.BackColor = $T.cyan
+    $track.Controls.Add($bar)
+    $f.Controls.AddRange(@($t1, $t2, $st, $track))
+    $f.Show(); [Windows.Forms.Application]::DoEvents()
+    return [pscustomobject]@{ form = $f; status = $st; bar = $bar }
+}
+
+function Set-SplashStatus($S, [string]$Text) {
+    if (-not $S) { return }
+    $S.status.Text = $Text
+    $x = $S.bar.Left + 70; if ($x -gt 310) { $x = 0 }
+    $S.bar.Left = $x
+    [Windows.Forms.Application]::DoEvents()
+}
+
+function New-DarkButton($T, [string]$Text, [string]$Kind = 'normal', [int]$Width = 0) {
+    $b = New-Object Windows.Forms.Button
+    $b.Text = $Text; $b.FlatStyle = 'Flat'; $b.Height = 32; $b.Cursor = 'Hand'
+    $b.Font = New-Object Drawing.Font('Segoe UI Semibold', 9.5)
+    if ($Width -gt 0) { $b.Width = $Width } else { $b.AutoSize = $true; $b.AutoSizeMode = 'GrowAndShrink'; $b.Padding = New-Object Windows.Forms.Padding(10, 0, 10, 0) }
+    switch ($Kind) {
+        'primary' { $b.BackColor = $T.accent; $b.ForeColor = $T.accentText; $b.FlatAppearance.BorderSize = 0; $b.FlatAppearance.MouseOverBackColor = (New-Rgb 236 163 84) }
+        'play'    { $b.BackColor = (New-Rgb 245 245 245); $b.ForeColor = (New-Rgb 20 20 22); $b.FlatAppearance.BorderSize = 0; $b.FlatAppearance.MouseOverBackColor = (New-Rgb 255 255 255); $b.Font = New-Object Drawing.Font('Segoe UI Semibold', 12) }
+        'nav'     { $b.BackColor = $T.sidebar; $b.ForeColor = $T.text; $b.FlatAppearance.BorderSize = 0; $b.FlatAppearance.MouseOverBackColor = $T.hover; $b.TextAlign = 'MiddleLeft'; $b.Height = 38; $b.Padding = New-Object Windows.Forms.Padding(14, 0, 0, 0); $b.Font = New-Object Drawing.Font('Segoe UI', 10) }
+        default   { $b.BackColor = $T.panel2; $b.ForeColor = $T.text; $b.FlatAppearance.BorderColor = $T.border; $b.FlatAppearance.BorderSize = 1; $b.FlatAppearance.MouseOverBackColor = $T.hover }
+    }
+    return $b
+}
+
+function New-DarkGrid($T) {
+    $g = New-Object Windows.Forms.DataGridView
+    $g.Dock = 'Fill'; $g.BackgroundColor = $T.bg; $g.BorderStyle = 'None'; $g.GridColor = $T.border
+    $g.RowHeadersVisible = $false; $g.AllowUserToAddRows = $false; $g.AllowUserToDeleteRows = $false; $g.AllowUserToResizeRows = $false
+    $g.SelectionMode = 'FullRowSelect'; $g.MultiSelect = $false; $g.AutoGenerateColumns = $false; $g.EnableHeadersVisualStyles = $false
+    $g.CellBorderStyle = 'SingleHorizontal'; $g.ColumnHeadersBorderStyle = 'None'; $g.ColumnHeadersHeight = 34; $g.ColumnHeadersHeightSizeMode = 'DisableResizing'
+    $g.ColumnHeadersDefaultCellStyle.BackColor = $T.panel; $g.ColumnHeadersDefaultCellStyle.ForeColor = $T.muted
+    $g.ColumnHeadersDefaultCellStyle.Font = New-Object Drawing.Font('Segoe UI Semibold', 9.5); $g.ColumnHeadersDefaultCellStyle.SelectionBackColor = $T.panel
+    $g.DefaultCellStyle.BackColor = $T.bg; $g.DefaultCellStyle.ForeColor = $T.text; $g.DefaultCellStyle.Font = New-Object Drawing.Font('Segoe UI', 9.75)
+    $g.DefaultCellStyle.SelectionBackColor = $T.select; $g.DefaultCellStyle.SelectionForeColor = [Drawing.Color]::White
+    $g.DefaultCellStyle.Padding = New-Object Windows.Forms.Padding(4, 0, 4, 0)
+    $g.RowTemplate.Height = 32; $g.ReadOnly = $false
+    # double buffering stops flicker on big lists
+    $prop = $g.GetType().GetProperty('DoubleBuffered', [Reflection.BindingFlags]'Instance,NonPublic'); if ($prop) { $prop.SetValue($g, $true, $null) }
+    return $g
+}
+
+function Add-GridColumn($Grid, [string]$Name, [string]$Header, [int]$Width, [string]$Type = 'text', [int]$Fill = 0) {
+    $c = if ($Type -eq 'check') { New-Object Windows.Forms.DataGridViewCheckBoxColumn } else { New-Object Windows.Forms.DataGridViewTextBoxColumn }
+    $c.Name = $Name; $c.HeaderText = $Header; $c.SortMode = 'Automatic'
+    if ($Fill -gt 0) { $c.AutoSizeMode = 'Fill'; $c.FillWeight = $Fill; $c.MinimumWidth = $Width } else { $c.Width = $Width }
+    if ($Type -ne 'check') { $c.ReadOnly = $true }
+    [void]$Grid.Columns.Add($c)
+    return $c
+}
+
+function New-DesktopShortcut([string]$Root) {
+    $ps1 = Join-Path $Root 'NightCityInstaller.ps1'; $ico = Join-Path $Root 'NightCityInstaller.ico'
+    $desk = [Environment]::GetFolderPath('Desktop')
+    $path = Join-Path $desk 'Night City Installer.lnk'
+    $ws = New-Object -ComObject WScript.Shell
+    $lnk = $ws.CreateShortcut($path)
+    $lnk.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $lnk.Arguments = "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$ps1`""
+    $lnk.WorkingDirectory = $Root; $lnk.Description = 'Night City Installer - Cyberpunk 2077 mods'
+    if (Test-Path -LiteralPath $ico) { $lnk.IconLocation = "$ico,0" }
+    $lnk.Save()
+    return $path
+}
 
 function Start-App {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     [Windows.Forms.Application]::EnableVisualStyles()
+    $T = Get-Theme
+    $logoPath = Join-Path $script:Root 'NightCityInstaller.png'
+    $icoPath = Join-Path $script:Root 'NightCityInstaller.ico'
+    $splash = Show-Splash $T $logoPath
+    Write-Trace 'splash shown'
 
     Ensure-DataDir
     $script:LogFile = Join-Path $script:DataDir 'log.txt'
+    Set-SplashStatus $splash 'Reading your mod list...'
     $manifest = Load-Manifest
     $config = Load-Config
     $state = Load-State
+    $startupNotes = New-Object System.Collections.ArrayList
     $startIds = $null
-    if ($config.gameDir -and (Test-Path -LiteralPath $config.gameDir)) { $startIds = Get-InstalledNexusIds $config.gameDir }
+    if ($config.gameDir -and (Test-Path -LiteralPath $config.gameDir)) {
+        Set-SplashStatus $splash 'Checking the game folder...'
+        try { if ($config.autoFix -and (Repair-EmptyModdedCache $config.gameDir)) { [void]$startupNotes.Add('Health: renamed an empty r6\cache\modded folder that makes the game crash on start-up.') } } catch {}
+        Set-SplashStatus $splash 'Reading what Vortex has installed...'
+        $startIds = Get-InstalledNexusIds $config.gameDir
+    }
     $null = Add-DiscoveredToManifest $manifest (Read-DiscoveryStore) $startIds
+    Set-SplashStatus $splash 'Building the window...'
+    Write-Trace 'building window'
 
-    $font = New-Object Drawing.Font('Segoe UI', 9.5)
-    $bold = New-Object Drawing.Font('Segoe UI Semibold', 10.5)
+    $font = New-Object Drawing.Font('Segoe UI', 9.75)
+    $bold = New-Object Drawing.Font('Segoe UI Semibold', 10)
+    $pillFont = New-Object Drawing.Font('Segoe UI Semibold', 8.75)
+    $titleFont = New-Object Drawing.Font('Segoe UI Semibold', 17)
 
     $form = New-Object Windows.Forms.Form
-    $form.Text = "$($script:AppName) $($script:AppVersion)"
-    $form.Size = New-Object Drawing.Size(1100, 820)
-    $form.MinimumSize = New-Object Drawing.Size(880, 620)
-    $form.StartPosition = 'CenterScreen'
-    $form.Font = $font
+    $form.Text = "Night City Installer $($script:AppVersion)"
+    $form.Size = New-Object Drawing.Size(1440, 900); $form.MinimumSize = New-Object Drawing.Size(1100, 680)
+    $form.StartPosition = 'CenterScreen'; $form.Font = $font; $form.BackColor = $T.bg; $form.ForeColor = $T.text; $form.WindowState = 'Maximized'
+    if (Test-Path -LiteralPath $icoPath) { try { $form.Icon = New-Object Drawing.Icon($icoPath) } catch {} }
 
-    # ---- top: game folder + accounts
-    $top = New-Object Windows.Forms.TableLayoutPanel
-    $top.Dock = 'Top'; $top.AutoSize = $true; $top.ColumnCount = 4; $top.Padding = New-Object Windows.Forms.Padding(10, 10, 10, 4)
-    [void]$top.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('AutoSize')))
-    [void]$top.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 100)))
-    [void]$top.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('AutoSize')))
-    [void]$top.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('AutoSize')))
-    $lblGame = New-Object Windows.Forms.Label; $lblGame.Text = 'Game folder'; $lblGame.AutoSize = $true; $lblGame.Anchor = 'Left'
-    $txtGame = New-Object Windows.Forms.TextBox; $txtGame.Text = $config.gameDir; $txtGame.Dock = 'Fill'
-    $btnBrowse = New-Object Windows.Forms.Button; $btnBrowse.Text = 'Browse...'; $btnBrowse.AutoSize = $true
-    $btnAccounts = New-Object Windows.Forms.Button; $btnAccounts.Text = 'Accounts...'; $btnAccounts.AutoSize = $true
-    $lblAcct = New-Object Windows.Forms.Label; $lblAcct.AutoSize = $true; $lblAcct.ForeColor = [Drawing.Color]::DimGray
-    $top.Controls.Add($lblGame, 0, 0); $top.Controls.Add($txtGame, 1, 0); $top.Controls.Add($btnBrowse, 2, 0); $top.Controls.Add($btnAccounts, 3, 0)
-    $top.Controls.Add($lblAcct, 1, 1); $top.SetColumnSpan($lblAcct, 3)
+    # ================= sidebar =================
+    $side = New-Object Windows.Forms.Panel; $side.Dock = 'Left'; $side.Width = 220; $side.BackColor = $T.sidebar
+    $brand = New-Object Windows.Forms.Panel; $brand.Dock = 'Top'; $brand.Height = 72; $brand.BackColor = $T.sidebar
+    if (Test-Path -LiteralPath $logoPath) {
+        $lg = New-Object Windows.Forms.PictureBox; $lg.Bounds = New-Object Drawing.Rectangle(16, 16, 40, 40); $lg.SizeMode = 'Zoom'
+        $lg.Image = [Drawing.Image]::FromStream((New-Object IO.MemoryStream (, [IO.File]::ReadAllBytes($logoPath)))); $brand.Controls.Add($lg)
+    }
+    $bt = New-Object Windows.Forms.Label; $bt.Text = 'Night City'; $bt.Font = New-Object Drawing.Font('Segoe UI Semibold', 12); $bt.ForeColor = $T.yellow; $bt.Bounds = New-Object Drawing.Rectangle(64, 14, 150, 24)
+    $bs = New-Object Windows.Forms.Label; $bs.Text = 'Installer for Cyberpunk 2077'; $bs.Font = New-Object Drawing.Font('Segoe UI', 8.5); $bs.ForeColor = $T.muted; $bs.Bounds = New-Object Drawing.Rectangle(64, 38, 156, 20)
+    $brand.Controls.AddRange(@($bt, $bs))
+    $nav = New-Object Windows.Forms.FlowLayoutPanel; $nav.Dock = 'Fill'; $nav.FlowDirection = 'TopDown'; $nav.WrapContents = $false; $nav.BackColor = $T.sidebar; $nav.Padding = New-Object Windows.Forms.Padding(0, 8, 0, 0)
+    $navButtons = [ordered]@{}
+    foreach ($n in @('Mods', 'Updates', 'Health check', 'Settings', 'Log')) {
+        $b = New-DarkButton $T $n 'nav' 220; $b.Margin = New-Object Windows.Forms.Padding(0); $b.Tag = $n
+        $nav.Controls.Add($b); $navButtons[$n] = $b
+    }
+    $sideBottom = New-Object Windows.Forms.Panel; $sideBottom.Dock = 'Bottom'; $sideBottom.Height = 96; $sideBottom.BackColor = $T.sidebar
+    $btnPlay = New-DarkButton $T ([string][char]0x25B6 + '  Play') 'play' 188; $btnPlay.Height = 44; $btnPlay.Location = New-Object Drawing.Point(16, 14)
+    $verLbl = New-Object Windows.Forms.Label; $verLbl.Text = "v$($script:AppVersion)"; $verLbl.ForeColor = $T.muted; $verLbl.Font = New-Object Drawing.Font('Segoe UI', 8); $verLbl.Bounds = New-Object Drawing.Rectangle(16, 66, 188, 18)
+    $sideBottom.Controls.AddRange(@($btnPlay, $verLbl))
+    $side.Controls.Add($nav); $side.Controls.Add($sideBottom); $side.Controls.Add($brand)
 
-    # ---- banner
-    $banner = New-Object Windows.Forms.Panel
-    $banner.Dock = 'Top'; $banner.Height = 92; $banner.BackColor = [Drawing.Color]::FromArgb(255, 246, 214); $banner.Padding = New-Object Windows.Forms.Padding(12, 8, 12, 8)
-    $bannerText = New-Object Windows.Forms.Label; $bannerText.Dock = 'Fill'; $bannerText.Font = $bold
-    $bannerBtns = New-Object Windows.Forms.FlowLayoutPanel; $bannerBtns.Dock = 'Bottom'; $bannerBtns.Height = 36; $bannerBtns.FlowDirection = 'LeftToRight'
+    # ================= main area =================
+    $main = New-Object Windows.Forms.Panel; $main.Dock = 'Fill'; $main.BackColor = $T.bg
+    $header = New-Object Windows.Forms.Panel; $header.Dock = 'Top'; $header.Height = 70; $header.BackColor = $T.bg; $header.Padding = New-Object Windows.Forms.Padding(24, 12, 24, 0)
+    $hTitle = New-Object Windows.Forms.Label; $hTitle.Font = $titleFont; $hTitle.ForeColor = $T.text; $hTitle.Bounds = New-Object Drawing.Rectangle(24, 10, 600, 32)
+    $hSub = New-Object Windows.Forms.Label; $hSub.Font = $font; $hSub.ForeColor = $T.muted; $hSub.Bounds = New-Object Drawing.Rectangle(24, 42, 900, 20)
+    $header.Controls.AddRange(@($hTitle, $hSub))
+    $banner = New-Object Windows.Forms.Panel; $banner.Dock = 'Top'; $banner.Height = 64; $banner.BackColor = $T.banner; $banner.Padding = New-Object Windows.Forms.Padding(24, 8, 24, 6); $banner.Visible = $false
+    $bannerText = New-Object Windows.Forms.Label; $bannerText.Dock = 'Fill'; $bannerText.ForeColor = $T.bannerText; $bannerText.Font = $bold
+    $bannerBtns = New-Object Windows.Forms.FlowLayoutPanel; $bannerBtns.Dock = 'Right'; $bannerBtns.AutoSize = $true; $bannerBtns.WrapContents = $false; $bannerBtns.BackColor = $T.banner
     $banner.Controls.Add($bannerText); $banner.Controls.Add($bannerBtns)
+    $statusBar = New-Object Windows.Forms.Label; $statusBar.Dock = 'Bottom'; $statusBar.Height = 28; $statusBar.BackColor = $T.sidebar; $statusBar.ForeColor = $T.muted; $statusBar.Padding = New-Object Windows.Forms.Padding(24, 6, 0, 0)
+    $pages = New-Object Windows.Forms.Panel; $pages.Dock = 'Fill'; $pages.BackColor = $T.bg; $pages.Padding = New-Object Windows.Forms.Padding(24, 8, 24, 12)
+    $main.Controls.Add($pages); $main.Controls.Add($statusBar); $main.Controls.Add($banner); $main.Controls.Add($header)
 
-    # ---- tabs
-    $tabs = New-Object Windows.Forms.TabControl; $tabs.Dock = 'Fill'
-    $tabInstall = New-Object Windows.Forms.TabPage; $tabInstall.Text = 'Install'
-    $tabUpdates = New-Object Windows.Forms.TabPage; $tabUpdates.Text = 'Updates'
-    [void]$tabs.TabPages.Add($tabInstall); [void]$tabs.TabPages.Add($tabUpdates)
+    $pageMods = New-Object Windows.Forms.Panel; $pageMods.Dock = 'Fill'
+    $pageUpd = New-Object Windows.Forms.Panel; $pageUpd.Dock = 'Fill'; $pageUpd.Visible = $false
+    $pageHealth = New-Object Windows.Forms.Panel; $pageHealth.Dock = 'Fill'; $pageHealth.Visible = $false
+    $pageSet = New-Object Windows.Forms.Panel; $pageSet.Dock = 'Fill'; $pageSet.Visible = $false; $pageSet.AutoScroll = $true
+    $pageLog = New-Object Windows.Forms.Panel; $pageLog.Dock = 'Fill'; $pageLog.Visible = $false
+    $pages.Controls.AddRange(@($pageMods, $pageUpd, $pageHealth, $pageSet, $pageLog))
+    $pageInfo = @{
+        'Mods'         = @{ panel = $pageMods; title = 'Mods'; sub = 'Install and manage the Night City Load Order for Cyberpunk 2077 patch 2.5.' }
+        'Updates'      = @{ panel = $pageUpd; title = 'Updates'; sub = 'Newer files for the mods Vortex has installed, plus updates to this app.' }
+        'Health check' = @{ panel = $pageHealth; title = 'Health check'; sub = 'Problems that can stop the game from starting, and fixes for them.' }
+        'Settings'     = @{ panel = $pageSet; title = 'Settings'; sub = 'Game folder, accounts and options.' }
+        'Log'          = @{ panel = $pageLog; title = 'Log'; sub = "Everything the app has done. Also saved to $($script:DataDir)\log.txt" }
+    }
 
-    # Install tab
-    $list = New-Object Windows.Forms.ListView
-    $list.View = 'Details'; $list.CheckBoxes = $true; $list.FullRowSelect = $true; $list.Dock = 'Fill'; $list.HideSelection = $false
-    [void]$list.Columns.Add('Mod', 330); [void]$list.Columns.Add('Source', 70); [void]$list.Columns.Add('Status', 150); [void]$list.Columns.Add('Detail', 470)
+    # ---------- Mods page ----------
+    $toolbar = New-Object Windows.Forms.FlowLayoutPanel; $toolbar.Dock = 'Top'; $toolbar.Height = 44; $toolbar.WrapContents = $false; $toolbar.BackColor = $T.bg
+    $btnStart = New-DarkButton $T ([string][char]0x25B6 + '  Start install') 'primary'
+    $btnPause = New-DarkButton $T 'Pause'; $btnPause.Enabled = $false
+    $btnRefresh = New-DarkButton $T ([string][char]0x21BB + '  Refresh')
+    $btnAll = New-DarkButton $T 'Tick all'; $btnNone = New-DarkButton $T 'Untick all'; $btnReset = New-DarkButton $T 'Reset progress'
+    $chkPause = New-Object Windows.Forms.CheckBox; $chkPause.Text = 'Pause after each batch to test'; $chkPause.AutoSize = $true; $chkPause.ForeColor = $T.muted; $chkPause.Margin = New-Object Windows.Forms.Padding(14, 9, 0, 0); $chkPause.Checked = [bool]$config.pauseBetweenBatches
+    foreach ($c in @($btnStart, $btnPause, $btnRefresh, $btnAll, $btnNone, $btnReset)) { $c.Margin = New-Object Windows.Forms.Padding(0, 4, 8, 4) }
+    $toolbar.Controls.AddRange(@($btnStart, $btnPause, $btnRefresh, $btnAll, $btnNone, $btnReset, $chkPause))
+    $filters = New-Object Windows.Forms.FlowLayoutPanel; $filters.Dock = 'Top'; $filters.Height = 40; $filters.WrapContents = $false; $filters.BackColor = $T.bg
+    $lblSearch = New-Object Windows.Forms.Label; $lblSearch.Text = 'Search'; $lblSearch.ForeColor = $T.muted; $lblSearch.AutoSize = $true; $lblSearch.Margin = New-Object Windows.Forms.Padding(0, 10, 6, 0)
+    $txtSearch = New-Object Windows.Forms.TextBox; $txtSearch.Width = 260; $txtSearch.BackColor = $T.panel2; $txtSearch.ForeColor = $T.text; $txtSearch.BorderStyle = 'FixedSingle'; $txtSearch.Margin = New-Object Windows.Forms.Padding(0, 7, 18, 0)
+    $lblCat = New-Object Windows.Forms.Label; $lblCat.Text = 'Category'; $lblCat.ForeColor = $T.muted; $lblCat.AutoSize = $true; $lblCat.Margin = New-Object Windows.Forms.Padding(0, 10, 6, 0)
+    $cmbCat = New-Object Windows.Forms.ComboBox; $cmbCat.DropDownStyle = 'DropDownList'; $cmbCat.Width = 280; $cmbCat.BackColor = $T.panel2; $cmbCat.ForeColor = $T.text; $cmbCat.FlatStyle = 'Flat'; $cmbCat.Margin = New-Object Windows.Forms.Padding(0, 7, 18, 0)
+    $lblSt = New-Object Windows.Forms.Label; $lblSt.Text = 'Status'; $lblSt.ForeColor = $T.muted; $lblSt.AutoSize = $true; $lblSt.Margin = New-Object Windows.Forms.Padding(0, 10, 6, 0)
+    $cmbSt = New-Object Windows.Forms.ComboBox; $cmbSt.DropDownStyle = 'DropDownList'; $cmbSt.Width = 170; $cmbSt.BackColor = $T.panel2; $cmbSt.ForeColor = $T.text; $cmbSt.FlatStyle = 'Flat'; $cmbSt.Margin = New-Object Windows.Forms.Padding(0, 7, 18, 0)
+    [void]$cmbSt.Items.AddRange(@('All', 'Installed', 'Not installed', 'Ticked', 'Update available', 'Waiting / needs something', 'Problems'))
+    $cmbSt.SelectedIndex = 0
+    $filters.Controls.AddRange(@($lblSearch, $txtSearch, $lblCat, $cmbCat, $lblSt, $cmbSt))
+
+    $split = New-Object Windows.Forms.SplitContainer; $split.Dock = 'Fill'; $split.BackColor = $T.border; $split.SplitterWidth = 4; $split.Panel1.BackColor = $T.bg; $split.Panel2.BackColor = $T.panel
+    $grid = New-DarkGrid $T
+    $null = Add-GridColumn $grid 'Q' '' 36 'check'
+    $colStatus = Add-GridColumn $grid 'Status' 'Status' 150
+    $null = Add-GridColumn $grid 'ModName' 'Mod Name' 260 'text' 46
+    $null = Add-GridColumn $grid 'Version' 'Version' 90
+    $null = Add-GridColumn $grid 'Category' 'Category' 220
+    $null = Add-GridColumn $grid 'Source' 'Source' 70
+    $null = Add-GridColumn $grid 'Info' 'Info' 160 'text' 30
+    $grid.Columns['Q'].HeaderText = [string][char]0x2713
+    $split.Panel1.Controls.Add($grid)
+
+    # details pane
+    $det = New-Object Windows.Forms.Panel; $det.Dock = 'Fill'; $det.BackColor = $T.panel; $det.Padding = New-Object Windows.Forms.Padding(16, 14, 16, 14); $det.AutoScroll = $true
+    $detPic = New-Object Windows.Forms.PictureBox; $detPic.Dock = 'Top'; $detPic.Height = 230; $detPic.SizeMode = 'Zoom'; $detPic.BackColor = $T.sidebar; $detPic.Cursor = 'Hand'
+    $detThumbs = New-Object Windows.Forms.FlowLayoutPanel; $detThumbs.Dock = 'Top'; $detThumbs.Height = 70; $detThumbs.WrapContents = $false; $detThumbs.AutoScroll = $true; $detThumbs.BackColor = $T.panel; $detThumbs.Padding = New-Object Windows.Forms.Padding(0, 6, 0, 0)
+    $detName = New-Object Windows.Forms.Label; $detName.Dock = 'Top'; $detName.Height = 54; $detName.Font = New-Object Drawing.Font('Segoe UI Semibold', 14); $detName.ForeColor = $T.text; $detName.Padding = New-Object Windows.Forms.Padding(0, 10, 0, 0)
+    $detMeta = New-Object Windows.Forms.Label; $detMeta.Dock = 'Top'; $detMeta.Height = 40; $detMeta.ForeColor = $T.muted
+    $detLinks = New-Object Windows.Forms.FlowLayoutPanel; $detLinks.Dock = 'Top'; $detLinks.Height = 40; $detLinks.BackColor = $T.panel
+    $btnOpenPage = New-DarkButton $T 'Open mod page'; $btnOpenGallery = New-DarkButton $T 'All photos'
+    $detLinks.Controls.AddRange(@($btnOpenPage, $btnOpenGallery))
+    $detText = New-Object Windows.Forms.RichTextBox; $detText.Dock = 'Fill'; $detText.ReadOnly = $true; $detText.BorderStyle = 'None'; $detText.BackColor = $T.panel; $detText.ForeColor = $T.text; $detText.Font = $font; $detText.DetectUrls = $true
+    $det.Controls.Add($detText); $det.Controls.Add($detLinks); $det.Controls.Add($detMeta); $det.Controls.Add($detName); $det.Controls.Add($detThumbs); $det.Controls.Add($detPic)
+    $split.Panel2.Controls.Add($det)
+    $pageMods.Controls.Add($split); $pageMods.Controls.Add($filters); $pageMods.Controls.Add($toolbar)
+
+    # ---------- Updates page ----------
+    $updTool = New-Object Windows.Forms.FlowLayoutPanel; $updTool.Dock = 'Top'; $updTool.Height = 44; $updTool.WrapContents = $false
+    $btnCheck = New-DarkButton $T ([string][char]0x21BB + '  Check for updates') 'primary'
+    $btnUpdate = New-DarkButton $T ([string][char]0x2191 + '  Update ticked'); $btnUpdate.Enabled = $false
+    $btnAppUpd = New-DarkButton $T 'Update app'; $btnAppUpd.Visible = $false
+    $chkAuto = New-Object Windows.Forms.CheckBox; $chkAuto.Text = 'Check when the app opens'; $chkAuto.AutoSize = $true; $chkAuto.ForeColor = $T.muted; $chkAuto.Margin = New-Object Windows.Forms.Padding(14, 9, 0, 0); $chkAuto.Checked = [bool]$config.checkOnStart
+    $chkDisc = New-Object Windows.Forms.CheckBox; $chkDisc.Text = 'Look for new compatible mods when the app opens'; $chkDisc.AutoSize = $true; $chkDisc.ForeColor = $T.muted; $chkDisc.Margin = New-Object Windows.Forms.Padding(14, 9, 0, 0); $chkDisc.Checked = [bool]$config.discoverOnStart
+    foreach ($c in @($btnCheck, $btnUpdate, $btnAppUpd)) { $c.Margin = New-Object Windows.Forms.Padding(0, 4, 8, 4) }
+    $updTool.Controls.AddRange(@($btnCheck, $btnUpdate, $btnAppUpd, $chkAuto, $chkDisc))
+    $updHeader = New-Object Windows.Forms.Label; $updHeader.Dock = 'Top'; $updHeader.Height = 30; $updHeader.ForeColor = $T.muted; $updHeader.Padding = New-Object Windows.Forms.Padding(0, 6, 0, 0)
+    $updGrid = New-DarkGrid $T
+    $null = Add-GridColumn $updGrid 'Q' ([string][char]0x2713) 36 'check'
+    $colUStatus = Add-GridColumn $updGrid 'Status' 'Status' 170
+    $null = Add-GridColumn $updGrid 'ModName' 'Mod Name' 260 'text' 50
+    $null = Add-GridColumn $updGrid 'Installed' 'Installed' 110
+    $null = Add-GridColumn $updGrid 'Latest' 'Latest' 110
+    $null = Add-GridColumn $updGrid 'Category' 'Category' 200
+    $null = Add-GridColumn $updGrid 'Source' 'Source' 70
+    $pageUpd.Controls.Add($updGrid); $pageUpd.Controls.Add($updHeader); $pageUpd.Controls.Add($updTool)
+
+    # ---------- Health page ----------
+    $hTool = New-Object Windows.Forms.FlowLayoutPanel; $hTool.Dock = 'Top'; $hTool.Height = 44; $hTool.WrapContents = $false
+    $btnHealth = New-DarkButton $T ([string][char]0x21BB + '  Run health check') 'primary'
+    $btnFixAll = New-DarkButton $T 'Fix everything I can'
+    $chkAutoFix = New-Object Windows.Forms.CheckBox; $chkAutoFix.Text = 'Fix the start-up crash folder automatically'; $chkAutoFix.AutoSize = $true; $chkAutoFix.ForeColor = $T.muted; $chkAutoFix.Margin = New-Object Windows.Forms.Padding(14, 9, 0, 0); $chkAutoFix.Checked = [bool]$config.autoFix
+    foreach ($c in @($btnHealth, $btnFixAll)) { $c.Margin = New-Object Windows.Forms.Padding(0, 4, 8, 4) }
+    $hTool.Controls.AddRange(@($btnHealth, $btnFixAll, $chkAutoFix))
+    $hGrid = New-DarkGrid $T
+    $colHLevel = Add-GridColumn $hGrid 'Level' 'Level' 100
+    $null = Add-GridColumn $hGrid 'Problem' 'Problem' 300 'text' 35
+    $null = Add-GridColumn $hGrid 'Detail' 'Details' 300 'text' 65
+    $fixCol = New-Object Windows.Forms.DataGridViewButtonColumn; $fixCol.Name = 'Fix'; $fixCol.HeaderText = ''; $fixCol.Width = 110; $fixCol.FlatStyle = 'Flat'
+    $fixCol.DefaultCellStyle.BackColor = $T.accent; $fixCol.DefaultCellStyle.ForeColor = $T.accentText; [void]$hGrid.Columns.Add($fixCol)
+    $hGrid.RowTemplate.Height = 44; $hGrid.DefaultCellStyle.WrapMode = 'True'
+    $pageHealth.Controls.Add($hGrid); $pageHealth.Controls.Add($hTool)
+
+    # ---------- Settings page ----------
+    $setT = New-Object Windows.Forms.TableLayoutPanel; $setT.Dock = 'Top'; $setT.AutoSize = $true; $setT.ColumnCount = 3; $setT.BackColor = $T.bg
+    [void]$setT.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Absolute', 230)))
+    [void]$setT.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Absolute', 620)))
+    [void]$setT.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('AutoSize')))
+    $mkLabel = { param($txt) $l = New-Object Windows.Forms.Label; $l.Text = $txt; $l.ForeColor = $T.text; $l.AutoSize = $true; $l.Margin = New-Object Windows.Forms.Padding(0, 12, 8, 4); return $l }
+    $mkHint = { param($txt) $l = New-Object Windows.Forms.Label; $l.Text = $txt; $l.ForeColor = $T.muted; $l.AutoSize = $true; $l.MaximumSize = New-Object Drawing.Size(600, 0); $l.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 10); return $l }
+    $mkBox = { param($v, [bool]$secret) $b = New-Object Windows.Forms.TextBox; $b.Width = 600; $b.Text = $v; $b.BackColor = $T.panel2; $b.ForeColor = $T.text; $b.BorderStyle = 'FixedSingle'; $b.UseSystemPasswordChar = $secret; $b.Margin = New-Object Windows.Forms.Padding(0, 9, 8, 2); return $b }
+    $txtGame = & $mkBox $config.gameDir $false; $btnBrowse = New-DarkButton $T 'Browse...'
+    $k1 = & $mkBox $config.nexusKey $true; $k2 = & $mkBox $config.modioToken $true; $k4 = & $mkBox $config.modioApiPath $false; $k3 = & $mkBox $config.githubToken $true
+    $rows0 = @(
+        @('Game folder', $txtGame, $btnBrowse, 'The folder that contains bin\x64\Cyberpunk2077.exe.'),
+        @('Nexus API key', $k1, $null, 'Optional but recommended. next.nexusmods.com/settings/api-keys > Personal API Key. Needed for update checks, requirements and the newer mods.'),
+        @('mod.io token', $k2, $null, 'A Personal Access Token (or an older OAuth 2 token) with read and write access, from mod.io/me/access. Use the SAME account you linked in the game.'),
+        @('mod.io API path', $k4, $null, 'Leave empty unless mod.io/me/access shows a personal API path such as https://u-12345.modapi.io/v1.'),
+        @('GitHub token', $k3, $null, 'Optional. App updates come from the public repo github.com/Sirtacoburrito/NightCityInstaller.')
+    )
+    $r = 0
+    foreach ($row in $rows0) {
+        $setT.Controls.Add((& $mkLabel $row[0]), 0, $r); $setT.Controls.Add($row[1], 1, $r); if ($row[2]) { $setT.Controls.Add($row[2], 2, $r) }; $r++
+        $setT.Controls.Add((& $mkHint $row[3]), 1, $r); $r++
+    }
+    $setBtns = New-Object Windows.Forms.FlowLayoutPanel; $setBtns.AutoSize = $true
+    $btnTest = New-DarkButton $T 'Test connections'; $btnSave = New-DarkButton $T 'Save' 'primary'; $btnShortcut = New-DarkButton $T 'Create desktop shortcut'
+    $setBtns.Controls.AddRange(@($btnSave, $btnTest, $btnShortcut))
+    $setT.Controls.Add($setBtns, 1, $r); $r++
+    $setRes = New-Object Windows.Forms.Label; $setRes.AutoSize = $true; $setRes.MaximumSize = New-Object Drawing.Size(600, 0); $setRes.ForeColor = $T.muted; $setRes.Margin = New-Object Windows.Forms.Padding(0, 10, 0, 0)
+    $setT.Controls.Add($setRes, 1, $r); $r++
+    $about = & $mkHint "Night City Installer $($script:AppVersion). Source and updates: github.com/Sirtacoburrito/NightCityInstaller. Keys are encrypted for your Windows user and sent only to Nexus, mod.io and GitHub."
+    $setT.Controls.Add($about, 1, $r)
+    $pageSet.Controls.Add($setT)
+
+    # ---------- Log page ----------
+    $log = New-Object Windows.Forms.TextBox; $log.Multiline = $true; $log.ReadOnly = $true; $log.ScrollBars = 'Vertical'; $log.Dock = 'Fill'
+    $log.BackColor = $T.sidebar; $log.ForeColor = (New-Rgb 200 205 210); $log.BorderStyle = 'None'; $log.Font = New-Object Drawing.Font('Consolas', 9.5)
+    $pageLog.Controls.Add($log)
+
+    $form.Controls.Add($main); $form.Controls.Add($side)
+
+    # ================= state shared by the handlers =================
     $rows = @{}
     $locked = New-Object 'System.Collections.Generic.HashSet[string]'
     $updatesById = @{}
-    $groupCount = @{ n = 0 }
-    $ensureGroup = {
-        param([int]$bid)
-        if ($list.Groups["b$bid"]) { return }
-        $groupCount.n++; $b = $manifest.batches[$bid]
-        $src = if ($b.source -eq 'modio') { 'mod.io' } else { 'Nexus' }
-        [void]$list.Groups.Add((New-Object Windows.Forms.ListViewGroup("b$bid", "$($groupCount.n). $($b.name)   [$src]")))
-    }
-    $addRow = {
-        param($it)
-        & $ensureGroup $it.batch
-        $row = New-Object Windows.Forms.ListViewItem($it.name)
-        [void]$row.SubItems.Add($(if ($it.source -eq 'nexus') { 'Nexus' } else { 'mod.io' }))
-        $st = ''; $dt = ''; $done = $false
-        if ($state.ContainsKey($it.key)) { $st = $state[$it.key].status; $dt = $state[$it.key].detail; $done = $state[$it.key].done }
-        [void]$row.SubItems.Add($st); [void]$row.SubItems.Add($dt)
-        $row.Tag = $it.key
-        $row.Group = $list.Groups["b$($it.batch)"]
-        $row.Checked = (-not $it.optional) -and (-not $done)
-        if ($it.note -and -not $dt) { $row.SubItems[3].Text = $it.note }
-        [void]$list.Items.Add($row)
-        $rows[$it.key] = @{ row = $row; statusCol = 2; detailCol = 3 }
-    }
-    foreach ($it in $manifest.items) { & $addRow $it }
-    $bottom = New-Object Windows.Forms.FlowLayoutPanel
-    $bottom.Dock = 'Bottom'; $bottom.Height = 44; $bottom.Padding = New-Object Windows.Forms.Padding(4, 6, 4, 6)
-    $btnStart = New-Object Windows.Forms.Button; $btnStart.Text = 'Start'; $btnStart.Width = 110; $btnStart.Height = 30; $btnStart.Font = $bold
-    $btnPause = New-Object Windows.Forms.Button; $btnPause.Text = 'Pause'; $btnPause.Width = 90; $btnPause.Height = 30; $btnPause.Enabled = $false
-    $btnAll = New-Object Windows.Forms.Button; $btnAll.Text = 'Tick all'; $btnAll.Width = 90; $btnAll.Height = 30
-    $btnNone = New-Object Windows.Forms.Button; $btnNone.Text = 'Untick all'; $btnNone.Width = 90; $btnNone.Height = 30
-    $btnReset = New-Object Windows.Forms.Button; $btnReset.Text = 'Reset progress'; $btnReset.Width = 120; $btnReset.Height = 30
-    $chkPause = New-Object Windows.Forms.CheckBox; $chkPause.Text = 'Pause after each batch so I can test the game'; $chkPause.AutoSize = $true
-    $chkPause.Margin = New-Object Windows.Forms.Padding(16, 8, 0, 0); $chkPause.Checked = [bool]$config.pauseBetweenBatches
-    $bottom.Controls.AddRange(@($btnStart, $btnPause, $btnAll, $btnNone, $btnReset, $chkPause))
-    $summary = New-Object Windows.Forms.Panel; $summary.Dock = 'Top'; $summary.Height = 58; $summary.Padding = New-Object Windows.Forms.Padding(8, 6, 8, 4)
-    $sumText = New-Object Windows.Forms.Label; $sumText.Dock = 'Top'; $sumText.Height = 26; $sumText.Font = New-Object Drawing.Font('Segoe UI Semibold', 12)
-    $sumLegend = New-Object Windows.Forms.Label; $sumLegend.Dock = 'Top'; $sumLegend.Height = 22; $sumLegend.ForeColor = [Drawing.Color]::DimGray
-    $sumLegend.Text = "Green rows with $($script:Glyph.ok) are installed and locked (nothing to do).  Orange rows with $($script:Glyph.up) have an update and can be ticked.  Yellow rows are waiting.  White rows will be installed."
-    $summary.Controls.Add($sumLegend); $summary.Controls.Add($sumText)
-    $btnRefresh = New-Object Windows.Forms.Button; $btnRefresh.Text = 'Refresh installed'; $btnRefresh.Width = 130; $btnRefresh.Height = 30
-    $bottom.Controls.Add($btnRefresh); $bottom.Controls.SetChildIndex($btnRefresh, 5)
-    $tabInstall.Controls.Add($list); $tabInstall.Controls.Add($summary); $tabInstall.Controls.Add($bottom)
-
-    # Updates tab
-    $updHeader = New-Object Windows.Forms.Label; $updHeader.Dock = 'Top'; $updHeader.Height = 50; $updHeader.Padding = New-Object Windows.Forms.Padding(6, 6, 6, 0)
-    $updList = New-Object Windows.Forms.ListView
-    $updList.View = 'Details'; $updList.CheckBoxes = $true; $updList.FullRowSelect = $true; $updList.Dock = 'Fill'; $updList.HideSelection = $false
-    [void]$updList.Columns.Add('Mod', 330); [void]$updList.Columns.Add('Source', 70); [void]$updList.Columns.Add('Installed', 110); [void]$updList.Columns.Add('Latest', 110); [void]$updList.Columns.Add('Status', 400)
-    $gFw = New-Object Windows.Forms.ListViewGroup('fw', 'Frameworks (update these first)')
-    $gNx = New-Object Windows.Forms.ListViewGroup('nx', 'Nexus mods (installed through Vortex)')
-    $gMo = New-Object Windows.Forms.ListViewGroup('mo', 'mod.io mods (the game updates these by itself)')
-    [void]$updList.Groups.AddRange(@($gFw, $gNx, $gMo))
-    $updBottom = New-Object Windows.Forms.FlowLayoutPanel
-    $updBottom.Dock = 'Bottom'; $updBottom.Height = 44; $updBottom.Padding = New-Object Windows.Forms.Padding(4, 6, 4, 6)
-    $btnCheck = New-Object Windows.Forms.Button; $btnCheck.Text = 'Check for updates'; $btnCheck.Width = 150; $btnCheck.Height = 30; $btnCheck.Font = $bold
-    $btnUpdate = New-Object Windows.Forms.Button; $btnUpdate.Text = 'Update ticked'; $btnUpdate.Width = 130; $btnUpdate.Height = 30; $btnUpdate.Enabled = $false
-    $btnAppUpd = New-Object Windows.Forms.Button; $btnAppUpd.Text = 'Update app'; $btnAppUpd.AutoSize = $true; $btnAppUpd.Height = 30; $btnAppUpd.Visible = $false
-    $chkAuto = New-Object Windows.Forms.CheckBox; $chkAuto.Text = 'Check for updates when the app opens'; $chkAuto.AutoSize = $true
-    $chkAuto.Margin = New-Object Windows.Forms.Padding(16, 8, 0, 0); $chkAuto.Checked = [bool]$config.checkOnStart
-    $chkDisc = New-Object Windows.Forms.CheckBox; $chkDisc.Text = 'Look for new compatible mods when the app opens'; $chkDisc.AutoSize = $true
-    $chkDisc.Margin = New-Object Windows.Forms.Padding(16, 8, 0, 0); $chkDisc.Checked = [bool]$config.discoverOnStart
-    $updBottom.Controls.AddRange(@($btnCheck, $btnUpdate, $btnAppUpd, $chkAuto, $chkDisc))
-    $tabUpdates.Controls.Add($updList); $tabUpdates.Controls.Add($updHeader); $tabUpdates.Controls.Add($updBottom)
-
-    # ---- log
-    $log = New-Object Windows.Forms.TextBox
-    $log.Multiline = $true; $log.ReadOnly = $true; $log.ScrollBars = 'Vertical'; $log.Dock = 'Bottom'; $log.Height = 130
-    $log.Font = New-Object Drawing.Font('Consolas', 9)
-
-    $form.Controls.Add($tabs); $form.Controls.Add($banner); $form.Controls.Add($top); $form.Controls.Add($log)
-
     $engineRef = @{ E = $null; C = $null; D = $null; AppUpdate = $null }
-
-    $looks = @{
-        ok     = @{ back = [Drawing.Color]::FromArgb(222, 244, 226); fore = [Drawing.Color]::FromArgb(22, 101, 52) }
-        update = @{ back = [Drawing.Color]::FromArgb(255, 232, 204); fore = [Drawing.Color]::FromArgb(154, 52, 18) }
-        wait   = @{ back = [Drawing.Color]::FromArgb(254, 249, 214); fore = [Drawing.Color]::FromArgb(113, 63, 18) }
-        fail   = @{ back = [Drawing.Color]::FromArgb(254, 226, 226); fore = [Drawing.Color]::FromArgb(153, 27, 27) }
-        busy   = @{ back = [Drawing.Color]::FromArgb(224, 236, 255); fore = [Drawing.Color]::FromArgb(30, 64, 175) }
-        none   = @{ back = [Drawing.Color]::White; fore = [Drawing.Color]::Black }
-    }
-    $setLook = {
-        param($r, [string]$kind)
-        $r.UseItemStyleForSubItems = $true
-        $r.BackColor = $looks[$kind].back; $r.ForeColor = $looks[$kind].fore
-        $r.Font = if ($kind -eq 'ok') { $font } elseif ($kind -eq 'update') { $bold } else { $font }
+    $detailState = @{ key = ''; images = (New-Object System.Collections.ArrayList); pending = (New-Object System.Collections.ArrayList) }
+    $pill = @{
+        ok     = @{ back = (New-Rgb 46 96 52);  fore = (New-Rgb 205 245 200) }
+        update = @{ back = (New-Rgb 168 98 32); fore = (New-Rgb 255 245 230) }
+        wait   = @{ back = (New-Rgb 96 84 28);  fore = (New-Rgb 255 236 160) }
+        fail   = @{ back = (New-Rgb 120 44 44); fore = (New-Rgb 255 210 210) }
+        busy   = @{ back = (New-Rgb 40 74 130); fore = (New-Rgb 210 228 255) }
+        none   = @{ back = (New-Rgb 48 49 56);  fore = (New-Rgb 175 177 186) }
+        muted  = @{ back = (New-Rgb 40 41 46);  fore = (New-Rgb 130 132 140) }
     }
     $lookFor = {
         param([string]$status)
-        if ($status -match '^(Installed|Updated|Subscribed|Already|Up to date)') { return 'ok' }
-        if ($status -match '^(Waiting for 2\.5|Needs)') { return 'wait' }
-        if ($status -match '^(Failed|Not found)') { return 'fail' }
-        if ($status -match '^Update available') { return 'update' }
-        if ($status -match '^(Waiting for your click|Working)') { return 'busy' }
-        if ($status -eq 'Skipped') { return 'none' }
+        $s0 = $status -replace '^[^A-Za-z]+', ''
+        if ($s0 -match '^(Installed|Updated|Subscribed|Already|Up to date)') { return 'ok' }
+        if ($s0 -match '^(Waiting for 2\.5|Needs)') { return 'wait' }
+        if ($s0 -match '^(Failed|Not found)') { return 'fail' }
+        if ($s0 -match '^Update') { return 'update' }
+        if ($s0 -match '^(Waiting for your click|Working)') { return 'busy' }
+        if ($s0 -match '^Console only') { return 'muted' }
         return 'none'
     }
     $decorate = {
         param([string]$status)
         $k = & $lookFor $status
+        if (-not $status) { return 'Not installed' }
         if ($k -eq 'ok' -and -not $status.StartsWith($script:Glyph.ok)) { return "$($script:Glyph.ok) $status" }
         if ($k -eq 'update' -and -not $status.StartsWith($script:Glyph.up)) { return "$($script:Glyph.up) $status" }
         return $status
     }
+    $setStatusCell = {
+        param($row, [string]$status)
+        $txt = & $decorate $status
+        $row.Cells['Status'].Value = $txt
+        $row.Cells['Status'].Tag = (& $lookFor $txt)
+    }
+    $setLock = {
+        param($row, [bool]$on)
+        $k = [string]$row.Tag
+        if ($on) { [void]$locked.Add($k); $row.Cells['Q'].Value = $false; $row.Cells['Q'].ReadOnly = $true }
+        else { [void]$locked.Remove($k); $row.Cells['Q'].ReadOnly = $false }
+    }
+    $batchName = { param($it) $b = $manifest.batches[[int]$it.batch]; if ($b) { [string]$b.name } else { '' } }
+
+    $addRow = {
+        param($it)
+        $st = ''; $dt = ''; $done = $false
+        if ($state.ContainsKey($it.key)) { $st = $state[$it.key].status; $dt = $state[$it.key].detail; $done = $state[$it.key].done }
+        if (-not $dt -and $it.note) { $dt = $it.note }
+        $i = $grid.Rows.Add(((-not $it.optional) -and (-not $done)), '', $it.name, '', (& $batchName $it), $(if ($it.source -eq 'nexus') { 'Nexus' } else { 'mod.io' }), $dt)
+        $row = $grid.Rows[$i]; $row.Tag = $it.key
+        & $setStatusCell $row $st
+        $rows[$it.key] = @{ grid = 'mods'; row = $row }
+        $cat = & $batchName $it
+        if ($cat -and -not $cmbCat.Items.Contains($cat)) { [void]$cmbCat.Items.Add($cat) }
+    }
+    [void]$cmbCat.Items.Add('All categories')
+    foreach ($it in $manifest.items) { & $addRow $it }
+    $cmbCat.SelectedIndex = 0
+
     $updateSummary = {
-        $inst = 0; $wait = 0; $todo = 0
-        foreach ($it in $manifest.items) {
-            $t = $rows[$it.key].row.SubItems[2].Text
-            $k = & $lookFor ($t -replace "^[^A-Za-z]+", '')
-            if ($k -eq 'ok') { $inst++ } elseif ($k -eq 'wait') { $wait++ } elseif ($rows[$it.key].row.Checked) { $todo++ }
+        $inst = 0; $wait = 0; $todo = 0; $upd = 0
+        foreach ($row in $grid.Rows) {
+            $k = [string]$row.Cells['Status'].Tag
+            if ($k -eq 'ok') { $inst++ } elseif ($k -eq 'wait') { $wait++ } elseif ($k -eq 'update') { $upd++ }
+            if ($row.Cells['Q'].Value -eq $true) { $todo++ }
         }
-        $sumText.Text = "$($script:Glyph.ok) $inst installed      $($script:Glyph.dot) $todo ticked to install      $($script:Glyph.dot) $wait waiting      (of $($manifest.items.Count) in the list)"
-        $sumText.ForeColor = $looks.ok.fore
+        $statusBar.Text = "$($script:Glyph.ok) $inst installed     $($script:Glyph.up) $upd updates     $($script:Glyph.dot) $todo ticked to install     $($script:Glyph.dot) $wait waiting     ($($grid.Rows.Count) mods in the list)"
+        $navButtons['Updates'].Text = if ($upd -gt 0 -or $updatesById.Count -gt 0) { "Updates  ($([Math]::Max($upd, $updatesById.Count)))" } else { 'Updates' }
     }
 
-    # ---- UI adapter used by the engine and the update checker
+    $applyFilter = {
+        $q = $txtSearch.Text.Trim().ToLowerInvariant()
+        $cat = [string]$cmbCat.SelectedItem; $stf = [string]$cmbSt.SelectedItem
+        $grid.CurrentCell = $null
+        foreach ($row in $grid.Rows) {
+            $show = $true
+            if ($q -and -not ([string]$row.Cells['ModName'].Value).ToLowerInvariant().Contains($q)) { $show = $false }
+            if ($show -and $cat -and $cat -ne 'All categories' -and [string]$row.Cells['Category'].Value -ne $cat) { $show = $false }
+            if ($show -and $stf -and $stf -ne 'All') {
+                $k = [string]$row.Cells['Status'].Tag
+                switch ($stf) {
+                    'Installed'                 { $show = ($k -eq 'ok') }
+                    'Not installed'             { $show = ($k -in @('none', 'busy')) }
+                    'Ticked'                    { $show = ($row.Cells['Q'].Value -eq $true) }
+                    'Update available'          { $show = ($k -eq 'update') }
+                    'Waiting / needs something' { $show = ($k -eq 'wait') }
+                    'Problems'                  { $show = ($k -eq 'fail') }
+                }
+            }
+            $row.Visible = $show
+        }
+    }
+
+    # ---------------- UI adapter used by the engine, checker and discovery ----------------
     $ui = [pscustomobject]@{}
     $ui | Add-Member ScriptMethod Log {
         param($m)
@@ -1203,81 +1796,73 @@ function Start-App {
     $ui | Add-Member ScriptMethod SetStatus {
         param($key, $status, $detail)
         $entry = $rows[$key]; if (-not $entry) { return }
-        $r = $entry.row
-        $r.SubItems[$entry.statusCol].Text = (& $decorate $status)
-        if ($entry.detailCol -ge 0) { $r.SubItems[$entry.detailCol].Text = $detail }
-        $k = & $lookFor $status
-        & $setLook $r $k
-        if ($k -eq 'ok') {
-            $r.Checked = $false
-            if ($entry.statusCol -eq 2) {
-                [void]$locked.Add([string]$key)
+        $row = $entry.row
+        if ($entry.grid -eq 'mods') {
+            & $setStatusCell $row $status
+            if ($detail) { $row.Cells['Info'].Value = $detail }
+            $k = [string]$row.Cells['Status'].Tag
+            if ($k -eq 'ok' -or $k -eq 'muted') {
+                & $setLock $row $true
                 if ($key -like 'nexus:*') { $updatesById.Remove([int]($key -replace '^nexus:', '')) }
             }
+            try { if ($row.Visible) { $grid.FirstDisplayedScrollingRowIndex = [Math]::Max(0, $row.Index - 5) } } catch {}
+            & $updateSummary
+        } else {
+            $row.Cells['Status'].Value = (& $decorate $status); $row.Cells['Status'].Tag = (& $lookFor $status)
+            if ((& $lookFor $status) -eq 'ok') { $row.Cells['Q'].Value = $false }
         }
-        $r.EnsureVisible()
-        if ($entry.statusCol -eq 2) { & $updateSummary }
+        $grid.InvalidateColumn($colStatus.Index); $updGrid.InvalidateColumn($colUStatus.Index)
     }
     $ui | Add-Member ScriptMethod Banner {
         param($text, $buttons)
         $bannerText.Text = $text
         $bannerBtns.Controls.Clear()
         foreach ($b in @($buttons)) {
-            $btn = New-Object Windows.Forms.Button; $btn.Text = $b; $btn.AutoSize = $true; $btn.Height = 28
-            $btn.Add_Click({ param($s, $a) if ($s.Text -eq 'Update app') { & $doAppUpdate } elseif ($engineRef.E) { Invoke-EngineAction $engineRef.E $s.Text } })
+            $btn = New-DarkButton $T $b 'primary'; $btn.Margin = New-Object Windows.Forms.Padding(8, 6, 0, 0)
+            $btn.Add_Click({ param($s, $a) if ($s.Text -eq 'Update app') { & $doAppUpdate } elseif ($s.Text -eq 'Open Health check') { & $showPage 'Health check' } elseif ($engineRef.E) { Invoke-EngineAction $engineRef.E $s.Text } })
             $bannerBtns.Controls.Add($btn)
         }
         $banner.Visible = -not [string]::IsNullOrEmpty($text)
     }
     $ui | Add-Member ScriptMethod OpenUrl { param($u) Start-Process $u }
+    $ui | Add-Member ScriptMethod AddItem { param($it) if (-not $rows.ContainsKey($it.key)) { & $addRow $it; & $updateSummary } }
     $ui | Add-Member ScriptMethod UpdateRow {
         param($res)
         $entry = $rows[$res.key]
         if (-not $entry) {
-            $r = New-Object Windows.Forms.ListViewItem([string]$res.name)
-            [void]$r.SubItems.Add([string]$res.source); [void]$r.SubItems.Add(''); [void]$r.SubItems.Add(''); [void]$r.SubItems.Add('')
-            if ($res.source -eq 'mod.io') { $r.Group = $gMo } elseif ($res.framework) { $r.Group = $gFw } else { $r.Group = $gNx }
-            [void]$updList.Items.Add($r)
-            $entry = @{ row = $r; statusCol = 4; detailCol = -1 }
+            $cat = if ($res.source -eq 'mod.io') { 'mod.io (the game updates these)' } elseif ($res.framework) { 'Frameworks (update first)' } else { 'Nexus mods' }
+            $i = $updGrid.Rows.Add($false, '', [string]$res.name, '', '', $cat, [string]$res.source)
+            $entry = @{ grid = 'updates'; row = $updGrid.Rows[$i] }
             $rows[$res.key] = $entry
             if ($res.source -eq 'Nexus') { $rows["update:$($res.id)"] = $entry }
         }
-        $r = $entry.row
-        $r.Tag = $res
-        $r.SubItems[2].Text = [string]$res.installed; $r.SubItems[3].Text = [string]$res.latest; $r.SubItems[4].Text = (& $decorate ([string]$res.status))
-        $r.Checked = [bool]$res.update
-        if ($res.update) { & $setLook $r 'update' }
-        elseif ($res.status -like 'Updated*') { & $setLook $r 'busy' }
-        elseif ($res.status -like 'Up to date*') { & $setLook $r 'ok' }
-        elseif ($res.status -like 'Add a Nexus key*') { & $setLook $r 'wait' }
-        else { & $setLook $r 'fail' }
+        $row = $entry.row; $row.Tag = $res
+        $row.Cells['Installed'].Value = [string]$res.installed; $row.Cells['Latest'].Value = [string]$res.latest
+        $st = [string]$res.status
+        $row.Cells['Status'].Value = (& $decorate $st)
+        $row.Cells['Status'].Tag = $(if ($res.update) { 'update' } elseif ($st -like 'Up to date*') { 'ok' } elseif ($st -like 'Updated*') { 'busy' } elseif ($st -like 'Add a Nexus key*') { 'wait' } else { 'fail' })
+        $row.Cells['Q'].Value = [bool]$res.update; $row.Cells['Q'].ReadOnly = -not $res.update
     }
     $ui | Add-Member ScriptMethod CheckFinished {
         param($n)
         $updatesById.Clear()
         foreach ($res in @($engineRef.C.results | Where-Object { $_.update -and $_.source -eq 'Nexus' })) { $updatesById[[int]$res.id] = $res }
-        $unlocked = 0
         foreach ($id in @($updatesById.Keys)) {
             $entry = $rows["nexus:$id"]
-            if ($entry) {
-                $u = $updatesById[$id]; $r = $entry.row
-                [void]$locked.Remove("nexus:$id")
-                $r.SubItems[2].Text = (& $decorate 'Update available'); $r.SubItems[3].Text = "v$($u.installed) -> v$($u.latest)"
-                & $setLook $r 'update'; $r.Checked = $true; $unlocked++
+            if ($entry -and $entry.grid -eq 'mods') {
+                $u = $updatesById[$id]; $row = $entry.row
+                & $setLock $row $false
+                & $setStatusCell $row 'Update available'
+                $row.Cells['Info'].Value = "v$($u.installed) -> v$($u.latest)"; $row.Cells['Q'].Value = $true
             }
         }
-        if ($unlocked -gt 0) { & $updateSummary }
-        $btnCheck.Enabled = $true
-        $btnUpdate.Enabled = ($n -gt 0)
-        Update-UpdHeader
+        $btnCheck.Enabled = $true; $btnUpdate.Enabled = ($n -gt 0)
+        & $updateUpdHeader; & $updateSummary
         if ($n -gt 0) {
             $ui.Log("Update check: $n Nexus mods have updates.")
-            if (-not $engineRef.E -or $engineRef.E.mode -in @('idle', 'done')) {
-                $ui.Banner("$n of your Nexus mods have updates. Open the Updates tab and click 'Update ticked'. Frameworks go first.", @())
-            }
+            if (-not (& $engineBusy)) { $ui.Banner("$n of your mods have updates. They're ticked on the Mods page (orange), or use the Updates page.", @()) }
         } else { $ui.Log('Update check: everything is up to date.') }
     }
-
     $ui | Add-Member ScriptMethod DiscoveryFinished {
         param($keys)
         $added = 0
@@ -1290,10 +1875,120 @@ function Start-App {
         $nx = @($keys | Where-Object { $_ -like 'nexus:*' }).Count; $mo = $added - $nx
         if ($added -gt 0) {
             $ui.Log("Discovery: added $added new mods for this game version ($mo from mod.io, ticked; $nx from Nexus, unticked).")
-            if (-not (Test-EngineBusy)) { $ui.Banner("Found $added more mods that work with this game version. They're at the bottom of the list under 'Discovered'. mod.io finds are ticked; Nexus finds are unticked, so check their pages for requirements before ticking.", @()) }
+            if (-not (& $engineBusy)) { $ui.Banner("Found $added more mods that work with this game version. Filter the Category list by 'Discovered' to see them.", @()) }
         } else { $ui.Log('Discovery: no new compatible mods since last time.') }
     }
 
+    $engineBusy = { return ($engineRef.E -and $engineRef.E.mode -notin @('idle', 'done', 'paused')) }
+
+    # ---------------- details pane ----------------
+    $setImage = {
+        param($pb, [string]$path)
+        try { $pb.Image = ConvertTo-DrawingImage $path }
+        catch { $bytes = $null; $head = ''; try { $bytes = [IO.File]::ReadAllBytes($path); $head = [Text.Encoding]::ASCII.GetString($bytes, 0, [Math]::Min(48, $bytes.Length)) -replace '[^\x20-\x7e]', '.' } catch {}; Write-Trace "image decode failed for $path ($($bytes.Length) bytes, starts '$head'): $($_.Exception.Message)" }
+    }
+    $showDetails = {
+        param([string]$key)
+        $it = $manifest.items | Where-Object { $_.key -eq $key } | Select-Object -First 1
+        if (-not $it) { return }
+        $detailState.key = $key; $detailState.images.Clear(); $detailState.pending.Clear()
+        $detPic.Image = $null; $detThumbs.Controls.Clear()
+        $detName.Text = $it.name
+        $entry = $rows[$key]
+        $stTxt = if ($entry) { [string]$entry.row.Cells['Status'].Value } else { '' }
+        $detMeta.Text = "$(if ($it.source -eq 'nexus') { 'Nexus Mods' } else { 'mod.io' })   |   $(& $batchName $it)   |   $stTxt"
+        $parts = New-Object System.Collections.ArrayList
+        if ($it.desc) { [void]$parts.Add($it.desc) }
+        if ($it.note) { [void]$parts.Add("Note: $($it.note)") }
+        $detText.Text = ($parts -join "`n`n") + "`n`nLoading details from the mod page..."
+        $detailState.info = $null
+        $detailTimer.Stop(); $detailTimer.Start()
+    }
+    $detailTimer = New-Object Windows.Forms.Timer; $detailTimer.Interval = 60
+    $detailTimer.Add_Tick({
+        $detailTimer.Stop()
+        $key = $detailState.key
+        $it = $manifest.items | Where-Object { $_.key -eq $key } | Select-Object -First 1
+        if (-not $it) { return }
+        $info = $null
+        try {
+            if ($it.source -eq 'nexus') { $info = Get-NexusModInfo $it.id $config.nexusKey }
+            elseif ($config.modioToken) {
+                if (-not $config.modioGameId) { $config.modioGameId = Resolve-ModioGameId $config.modioToken; Save-Config $config }
+                $mid = [int]$it.modioId
+                $cache = Get-ModInfoCache
+                if (-not $mid -and $cache.ContainsKey("modioq:$($it.query)")) { $mid = [int]$cache["modioq:$($it.query)"].id }
+                if (-not $mid) {
+                    $sel = Select-ModioMatch (Search-Modio $config.modioGameId $it.query $config.modioToken -AnyPlatform) $it.query $it.exclude
+                    $hit = if ($sel.match) { $sel.match } elseif ($sel.choices.Count) { Select-MostPopular $sel.choices } else { $null }
+                    if ($hit) { $mid = [int]$hit.id; $cache["modioq:$($it.query)"] = [pscustomobject]@{ id = $mid; fetched = 0 }; Save-ModInfoCache }
+                }
+                if ($mid) { $info = Get-ModioModInfo $config.modioGameId $mid $config.modioToken }
+            }
+        } catch { $ui.Log("Couldn't load details for $($it.name): " + $_.Exception.Message) }
+        if ($key -ne $detailState.key) { return }
+        $detailState.info = $info
+        $parts = New-Object System.Collections.ArrayList
+        if ($it.desc) { [void]$parts.Add($it.desc) }
+        if ($info -and $info.summary -and $info.summary -ne $it.desc) { [void]$parts.Add($info.summary) }
+        if ($info) {
+            $reqs = @(Get-RequirementsFromText ([string]$info.description) ([int]$it.id))
+            if ($reqs.Count -gt 0) {
+                $have = if ($config.gameDir) { Get-InstalledNexusIds $config.gameDir } else { $null }
+                $lines = foreach ($q in $reqs) { $mark = if ($have -and $have.Contains([int]$q.id)) { 'installed' } else { 'MISSING' }; "  [$mark]  $($q.name)" }
+                [void]$parts.Add("Requirements:`n" + ($lines -join "`n"))
+            }
+            $meta = @()
+            if ($info.author) { $meta += "by $($info.author)" }
+            if ($info.version) { $meta += "v$($info.version)" }
+            if ($info.endorsements) { $meta += "$($info.endorsements) endorsements" }
+            if ($info.downloads) { $meta += ('{0:N0} downloads' -f [int]$info.downloads) }
+            if ($meta.Count) { $detMeta.Text = $detMeta.Text + "`n" + ($meta -join '   |   ') }
+            $long = ConvertTo-PlainText ([string]$info.description)
+            if ($long) { $long = $long.Trim(); if ($long.Length -gt 3000) { $long = $long.Substring(0, 3000) + '...' }; [void]$parts.Add("From the mod page:`n" + $long) }
+            foreach ($u in @($info.images)) { if ($u) { Write-Trace "image url: $u"; [void]$detailState.pending.Add([string]$u) } }
+        } elseif (-not $config.nexusKey -and $it.source -eq 'nexus') { [void]$parts.Add('Add your Nexus key in Settings to see photos, requirements and the full description here.') }
+        $rd = (Get-ModInfoCache)["readme:$key"]; if ($rd -and $rd.readme) { [void]$parts.Add("Readme:`n" + [string]$rd.readme) }
+        if ($it.note) { [void]$parts.Add("Note: $($it.note)") }
+        $detText.Text = $parts -join "`n`n"
+        if ($detailState.pending.Count -gt 0) { $imgTimer.Start() }
+    })
+    $imgTimer = New-Object Windows.Forms.Timer; $imgTimer.Interval = 40
+    $imgTimer.Add_Tick({
+        if ($detailState.pending.Count -eq 0) { $imgTimer.Stop(); return }
+        $u = [string]$detailState.pending[0]; $detailState.pending.RemoveAt(0)
+        $forKey = $detailState.key
+        try {
+            $p = Get-CachedImage $u
+            if ($p -and $forKey -eq $detailState.key) {
+                [void]$detailState.images.Add($p)
+                if (-not $detPic.Image) { & $setImage $detPic $p }
+                $tb = New-Object Windows.Forms.PictureBox; $tb.Size = New-Object Drawing.Size(100, 56); $tb.SizeMode = 'Zoom'; $tb.BackColor = $T.sidebar; $tb.Cursor = 'Hand'; $tb.Tag = $p; $tb.Margin = New-Object Windows.Forms.Padding(0, 0, 6, 0)
+                & $setImage $tb $p
+                $tb.Add_Click({ param($s, $a) & $setImage $detPic ([string]$s.Tag) })
+                $detThumbs.Controls.Add($tb)
+            }
+        } catch {}
+    })
+    $btnOpenPage.Add_Click({ $i = $detailState.info; $it = $manifest.items | Where-Object { $_.key -eq $detailState.key } | Select-Object -First 1
+        if ($i -and $i.url) { Start-Process $i.url } elseif ($it -and $it.source -eq 'nexus') { Start-Process "https://www.nexusmods.com/cyberpunk2077/mods/$($it.id)" } elseif ($it) { Start-Process ('https://mod.io/g/cyberpunk2077?_q=' + (UrlEnc $it.query)) } })
+    $btnOpenGallery.Add_Click({ $i = $detailState.info; if ($i -and $i.gallery) { Start-Process $i.gallery } })
+    $detPic.Add_Click({ $i = $detailState.info; if ($i -and $i.gallery) { Start-Process $i.gallery } })
+
+    # ---------------- page switching ----------------
+    $showPage = {
+        param([string]$name)
+        foreach ($k in $pageInfo.Keys) { $pageInfo[$k].panel.Visible = ($k -eq $name) }
+        foreach ($k in $navButtons.Keys) {
+            $b = $navButtons[$k]
+            if ($k -eq $name) { $b.BackColor = $T.hover; $b.ForeColor = $T.yellow } else { $b.BackColor = $T.sidebar; $b.ForeColor = $T.text }
+        }
+        $hTitle.Text = $pageInfo[$name].title; $hSub.Text = $pageInfo[$name].sub
+        if ($name -eq 'Health check') { & $runHealth }
+    }
+    foreach ($k in $navButtons.Keys) { $navButtons[$k].Add_Click({ param($s, $a) & $showPage ([string]$s.Tag) }) }
+
+    # ---------------- installed snapshot ----------------
     $refreshInstalled = {
         if (-not $config.gameDir -or -not (Test-Path -LiteralPath $config.gameDir)) { return }
         $subs = $null
@@ -1306,64 +2001,156 @@ function Start-App {
         $snap = Get-InstallSnapshot $manifest $config.gameDir $subs
         $n = 0
         foreach ($it in $manifest.items) {
-            $entry = $rows[$it.key]; $r = $entry.row
-            if (-not $snap.ContainsKey($it.key)) {
-                $saved = if ($state.ContainsKey($it.key)) { $state[$it.key].status } else { '' }
-                $r.SubItems[2].Text = (& $decorate $saved); & $setLook $r (& $lookFor $saved)
-                continue
-            }
+            $entry = $rows[$it.key]; if (-not $entry) { continue }
+            $row = $entry.row
+            $saved = if ($state.ContainsKey($it.key)) { $state[$it.key].status } else { '' }
+            if (-not $snap.ContainsKey($it.key)) { & $setStatusCell $row $saved; if ((& $lookFor $saved) -in @('ok', 'muted')) { & $setLock $row $true }; continue }
             $s = $snap[$it.key]
             if ($s.installed -and $it.source -eq 'nexus' -and $updatesById.ContainsKey([int]$it.id)) {
-                $n++
-                $u = $updatesById[[int]$it.id]
-                [void]$locked.Remove($it.key)
-                $r.SubItems[2].Text = (& $decorate 'Update available'); $r.SubItems[3].Text = "$($s.detail) -> v$($u.latest)"
-                & $setLook $r 'update'; $r.Checked = $true
+                $n++; $u = $updatesById[[int]$it.id]
+                & $setLock $row $false; & $setStatusCell $row 'Update available'
+                $row.Cells['Version'].Value = [string]$u.installed; $row.Cells['Info'].Value = "v$($u.installed) -> v$($u.latest)"; $row.Cells['Q'].Value = $true
             } elseif ($s.installed) {
                 $n++
-                $r.SubItems[2].Text = (& $decorate $(if ($it.source -eq 'nexus') { 'Installed' } else { 'Subscribed' }))
-                $r.SubItems[3].Text = $s.detail + $(if ($it.source -eq 'nexus') { '  (locked: no update)' } else { '  (locked: the game keeps it updated)' })
-                & $setLook $r 'ok'; $r.Checked = $false
-                [void]$locked.Add($it.key)
+                & $setStatusCell $row $(if ($it.source -eq 'nexus') { 'Installed' } else { 'Subscribed' })
+                if ($s.detail -match '^v(.+) in Vortex$') { $row.Cells['Version'].Value = $Matches[1] }
+                $row.Cells['Info'].Value = $(if ($it.source -eq 'nexus') { 'Locked: installed, no update' } else { 'Locked: the game keeps it updated' })
+                & $setLock $row $true
             } else {
-                [void]$locked.Remove($it.key)
-                $saved = if ($state.ContainsKey($it.key)) { $state[$it.key].status } else { '' }
-                if ((& $lookFor $saved) -eq 'ok') {
-                    # was installed earlier but is gone now (removed in Vortex or unsubscribed)
-                    $state.Remove($it.key); $saved = ''
-                    $r.SubItems[3].Text = 'Not installed any more'; $r.Checked = -not $it.optional
-                }
-                $r.SubItems[2].Text = (& $decorate $saved); & $setLook $r (& $lookFor $saved)
+                if ((& $lookFor $saved) -eq 'ok') { $state.Remove($it.key); $saved = ''; $row.Cells['Info'].Value = 'Not installed any more'; $row.Cells['Q'].Value = -not $it.optional }
+                if ((& $lookFor $saved) -eq 'muted') { & $setLock $row $true } else { & $setLock $row $false }
+                & $setStatusCell $row $saved
             }
         }
         Save-State $state
-        & $updateSummary
+        $grid.Invalidate(); & $updateSummary; & $applyFilter
         $ui.Log("Installed check: $n of $($manifest.items.Count) list mods are already in place.")
     }
 
-    function Update-AccountLabel {
-        $n = if ($config.nexusKey) { 'Nexus key saved' } else { 'No Nexus key (optional, needed for mod update checks)' }
-        $m = if ($config.modioToken) { 'mod.io token saved' } else { 'No mod.io token (needed for mod.io mods)' }
-        $g = if ($config.githubToken) { 'GitHub token saved' } else { 'App updates: public repo, no token needed' }
-        $lblAcct.Text = "$n  |  $m  |  $g"
+    # ---------------- health ----------------
+    $runHealth = {
+        $hGrid.Rows.Clear()
+        $issues = @(Get-HealthIssues $config.gameDir)
+        if ($issues.Count -eq 0) { $i = $hGrid.Rows.Add('OK', 'No problems found', 'The game folder looks healthy.', ''); $c0 = New-Object Windows.Forms.DataGridViewTextBoxCell; $c0.Value = ''; $hGrid.Rows[$i].Cells['Fix'] = $c0 }
+        foreach ($is in $issues) {
+            $i = $hGrid.Rows.Add($is.level.ToUpper(), $is.title, $is.detail, $(if ($is.fix) { 'Fix' } else { '' }))
+            $hGrid.Rows[$i].Tag = $is
+            if (-not $is.fix) { $c0 = New-Object Windows.Forms.DataGridViewTextBoxCell; $c0.Value = ''; $hGrid.Rows[$i].Cells['Fix'] = $c0 }
+        }
+        $err = @($issues | Where-Object { $_.level -eq 'error' }).Count
+        $navButtons['Health check'].Text = if ($err -gt 0) { "Health check  ($err)" } else { 'Health check' }
+        return $issues
     }
-    function Update-UpdHeader {
+    $applyFix = {
+        param($is)
+        try {
+            if ($is.fix -eq 'rename-modded') { if (Repair-EmptyModdedCache $config.gameDir) { $ui.Log('Health: renamed the empty r6\cache\modded folder.') } }
+            elseif ($is.fix -like 'manual:*') {
+                $name = $is.fix.Substring(7); $dir = Join-Path $config.gameDir "V2077\mod-extra-files\$name"
+                $res = Invoke-ManualInstall $config.gameDir (Get-ManualInstallPlan $dir $name) "extra:$name"
+                $ui.Log("Health: placed $($res.copied.Count) parked files for $name" + $(if ($res.skipped.Count) { " (kept $($res.skipped.Count) that already existed)" } else { '' }) + '.')
+            }
+        } catch { $ui.Log('Fix failed: ' + $_.Exception.Message) }
+    }
+    $hGrid.Add_CellContentClick({ param($s, $e) if ($e.RowIndex -ge 0 -and $hGrid.Columns[$e.ColumnIndex].Name -eq 'Fix') { $is = $hGrid.Rows[$e.RowIndex].Tag; if ($is -and $is.fix) { & $applyFix $is; & $runHealth | Out-Null } } })
+    $btnHealth.Add_Click({ & $runHealth | Out-Null })
+    $btnFixAll.Add_Click({ foreach ($is in @(Get-HealthIssues $config.gameDir)) { if ($is.fix) { & $applyFix $is } }; & $runHealth | Out-Null })
+    $hGrid.Add_CellFormatting({ param($s, $e)
+        if ($e.RowIndex -ge 0 -and $e.ColumnIndex -eq $colHLevel.Index) {
+            switch ([string]$e.Value) { 'ERROR' { $e.CellStyle.ForeColor = (New-Rgb 255 140 140) } 'WARNING' { $e.CellStyle.ForeColor = (New-Rgb 255 210 120) } 'OK' { $e.CellStyle.ForeColor = (New-Rgb 150 220 140) } default { $e.CellStyle.ForeColor = $T.muted } }
+        } })
+
+    # ---------------- status badges ----------------
+    $paintPill = {
+        param($s, $e, [int]$col)
+        if ($e.RowIndex -lt 0 -or $e.ColumnIndex -ne $col) { return }
+        $e.PaintBackground($e.ClipBounds, $true)
+        $k = [string]$s.Rows[$e.RowIndex].Cells[$col].Tag; if (-not $pill.ContainsKey($k)) { $k = 'none' }
+        $r = $e.CellBounds
+        $rect = New-Object Drawing.Rectangle(($r.X + 6), ($r.Y + 6), ($r.Width - 12), ($r.Height - 12))
+        $br = New-Object Drawing.SolidBrush($pill[$k].back); $e.Graphics.FillRectangle($br, $rect); $br.Dispose()
+        [Windows.Forms.TextRenderer]::DrawText($e.Graphics, [string]$e.Value, $pillFont, $rect, $pill[$k].fore, [Windows.Forms.TextFormatFlags]'HorizontalCenter, VerticalCenter, EndEllipsis, SingleLine')
+        $e.Handled = $true
+    }
+    $grid.Add_CellPainting({ param($s, $e) & $paintPill $s $e $colStatus.Index })
+    $updGrid.Add_CellPainting({ param($s, $e) & $paintPill $s $e $colUStatus.Index })
+    $grid.Add_CellFormatting({ param($s, $e)
+        if ($e.RowIndex -ge 0) {
+            $k = [string]$s.Rows[$e.RowIndex].Cells['Status'].Tag
+            if ($e.ColumnIndex -ne $colStatus.Index -and ($k -eq 'ok' -or $k -eq 'muted')) { $e.CellStyle.ForeColor = $T.muted }
+        } })
+
+    # ---------------- grid events ----------------
+    $grid.Add_CurrentCellDirtyStateChanged({ if ($grid.IsCurrentCellDirty) { $grid.CommitEdit([Windows.Forms.DataGridViewDataErrorContexts]::Commit) | Out-Null } })
+    $grid.Add_CellValueChanged({ param($s, $e) if ($e.RowIndex -ge 0 -and $e.ColumnIndex -eq 0) { & $updateSummary } })
+    $grid.Add_SelectionChanged({ $r0 = $grid.CurrentRow; if ($r0 -and $r0.Tag -and [string]$r0.Tag -ne $detailState.key) { & $showDetails ([string]$r0.Tag) } })
+    $grid.Add_DataError({ param($s, $e) $e.ThrowException = $false })
+    $updGrid.Add_CurrentCellDirtyStateChanged({ if ($updGrid.IsCurrentCellDirty) { $updGrid.CommitEdit([Windows.Forms.DataGridViewDataErrorContexts]::Commit) | Out-Null } })
+    $updGrid.Add_DataError({ param($s, $e) $e.ThrowException = $false })
+    $txtSearch.Add_TextChanged({ & $applyFilter })
+    $cmbCat.Add_SelectedIndexChanged({ & $applyFilter })
+    $cmbSt.Add_SelectedIndexChanged({ & $applyFilter })
+
+    # ---------------- updates header ----------------
+    $updateUpdHeader = {
         $gv = Get-GameVersion $config.gameDir
         $last = if ($state.ContainsKey('__lastCheck')) { $state['__lastCheck'].detail } else { 'never' }
-        $app = if ($engineRef.AppUpdate) { "App $($script:AppVersion), update to $($engineRef.AppUpdate.version) available" } else { "App $($script:AppVersion)" }
-        $updHeader.Text = "Game version: $(if ($gv) { $gv } else { 'unknown' })    |    $app    |    Last checked: $last" + [Environment]::NewLine + 'Ticked rows have a newer file on Nexus. Updating opens each file page in order; click "Slow download" and Vortex replaces the old version.'
+        $app = if ($engineRef.AppUpdate) { "App $($script:AppVersion), update to $($engineRef.AppUpdate.version) available" } else { "App $($script:AppVersion) (latest)" }
+        $updHeader.Text = "Game version: $(if ($gv) { $gv } else { 'unknown' })      $app      Last checked: $last"
     }
-    function Show-Preflight {
-        $config.gameDir = $txtGame.Text.Trim()
+
+    # ---------------- settings ----------------
+    $readSettings = {
+        $config.gameDir = $txtGame.Text.Trim(); $config.nexusKey = $k1.Text.Trim(); $config.modioToken = $k2.Text.Trim(); $config.modioApiPath = $k4.Text.Trim(); $config.githubToken = $k3.Text.Trim()
+    }
+    $preflight = {
+        & $readSettings
         $w = Get-PreflightWarnings $config
         if ($w.Count -gt 0) { $ui.Banner(($w -join ' '), @()); return $false }
         return $true
     }
-    function Test-EngineBusy { return ($engineRef.E -and $engineRef.E.mode -notin @('idle', 'done', 'paused')) }
+    $btnSave.Add_Click({
+        & $readSettings; Save-Config $config
+        if ($engineRef.E) { $engineRef.E.subscribed = $null }
+        if ((Get-ModioTokenKind $config.modioToken) -eq 'oauth2') { $ui.Log('mod.io: you are using an OAuth 2 token. It works for now, but mod.io is moving to Personal Access Tokens; swap it when you can.') }
+        $setRes.Text = 'Saved.'; $ui.Log('Settings saved.')
+    })
+    $btnTest.Add_Click({
+        & $readSettings
+        $out = @()
+        if ($config.nexusKey) {
+            try { $v = Invoke-Nexus 'users/validate.json' $config.nexusKey; $out += "Nexus: signed in as $($v.name)" + $(if ($v.is_premium) { ' (Premium)' } else { ' (free account)' }) }
+            catch { $out += 'Nexus: key rejected (' + $_.Exception.Message + ')' }
+        } else { $out += 'Nexus: no key (optional).' }
+        if ($config.modioToken) {
+            Set-ModioBase $config.modioApiPath
+            try {
+                $me = Invoke-Modio Get 'me' $config.modioToken
+                $out += "mod.io: signed in as $($me.username). This must be the account linked in the game's Mods menu."
+                if ((Get-ModioTokenKind $config.modioToken) -eq 'oauth2') { $out += 'mod.io: this is an OAuth 2 token, which mod.io is phasing out. Create a Personal Access Token on mod.io/me/access when you can.' }
+            } catch {
+                $code = Get-HttpStatus $_
+                $out += if ($code -eq 401) { 'mod.io: token rejected. It may have expired or been revoked; create a new Personal Access Token on mod.io/me/access.' } else { 'mod.io: could not connect (' + $_.Exception.Message + ').' }
+            }
+        } else { $out += 'mod.io: no token. The mod.io mods will wait until you add one.' }
+        try { $info = Test-AppUpdate $config.githubToken; $out += if ($info) { "GitHub: connected, app update $($info.version) available" } else { 'GitHub: connected, the app is up to date' } } catch { $out += 'GitHub: ' + $_.Exception.Message }
+        $setRes.Text = ($out -join [Environment]::NewLine)
+    })
+    $btnBrowse.Add_Click({
+        $fb = New-Object Windows.Forms.FolderBrowserDialog; $fb.Description = 'Select your Cyberpunk 2077 folder'
+        if ($txtGame.Text -and (Test-Path -LiteralPath $txtGame.Text)) { $fb.SelectedPath = $txtGame.Text }
+        if ($fb.ShowDialog($form) -eq 'OK') { $txtGame.Text = $fb.SelectedPath; & $readSettings; Save-Config $config; [void](& $preflight) }
+    })
+    $btnShortcut.Add_Click({ try { $p = New-DesktopShortcut $script:Root; $setRes.Text = "Shortcut created: $p"; $ui.Log("Desktop shortcut created: $p") } catch { $setRes.Text = 'Could not create the shortcut: ' + $_.Exception.Message } })
+    $chkPause.Add_CheckedChanged({ $config.pauseBetweenBatches = $chkPause.Checked; Save-Config $config })
+    $chkAuto.Add_CheckedChanged({ $config.checkOnStart = $chkAuto.Checked; Save-Config $config })
+    $chkDisc.Add_CheckedChanged({ $config.discoverOnStart = $chkDisc.Checked; Save-Config $config })
+    $chkAutoFix.Add_CheckedChanged({ $config.autoFix = $chkAutoFix.Checked; Save-Config $config })
 
+    # ---------------- app update ----------------
     $doAppUpdate = {
         if (-not $engineRef.AppUpdate) { return }
-        if (Test-EngineBusy) { $ui.Banner('Finish or pause the current install before updating the app.', @()); return }
+        if (& $engineBusy) { $ui.Banner('Finish or pause the current install before updating the app.', @()); return }
         try {
             $ui.Log("Downloading app update $($engineRef.AppUpdate.version)...")
             $backup = Install-AppUpdate $engineRef.AppUpdate $config.githubToken
@@ -1380,119 +2167,14 @@ function Start-App {
             if ($info) {
                 $btnAppUpd.Text = "Update app to $($info.version)"; $btnAppUpd.Visible = $true
                 $ui.Log("App update $($info.version) available: $($info.notes)")
-                if (-not (Test-EngineBusy)) { $ui.Banner("Night City Installer $($info.version) is available. $($info.notes)", @('Update app')) }
+                if (-not (& $engineBusy)) { $ui.Banner("Night City Installer $($info.version) is available. $($info.notes)", @('Update app')) }
             } elseif (-not $Quiet) { $ui.Log("The app is up to date ($($script:AppVersion)).") }
-        } catch { if (-not $Quiet) { $ui.Log('App update check: ' + $_.Exception.Message) } else { $ui.Log('App update check skipped: ' + $_.Exception.Message) } }
-        Update-UpdHeader
-    }
-    $startCheck = {
-        if (-not (Show-Preflight)) { return }
-        if ($engineRef.C -and -not $engineRef.C.done) { return }
-        $updList.Items.Clear()
-        foreach ($k in @($rows.Keys | Where-Object { $_ -like 'upd*' -or $_ -like 'update:*' })) { $rows.Remove($k) }
-        $btnCheck.Enabled = $false; $btnUpdate.Enabled = $false
-        $engineRef.C = New-UpdateChecker $config $state $ui
-        Start-UpdateCheck $engineRef.C
-        $ui.Log('Checking for mod updates...')
-        $chkTimer.Start()
-        & $checkApp $true
+        } catch { $ui.Log('App update check skipped: ' + $_.Exception.Message) }
+        & $updateUpdHeader
     }
 
-    # ---- events
-    $chkPause.Add_CheckedChanged({ $config.pauseBetweenBatches = $chkPause.Checked; Save-Config $config })
-    $chkAuto.Add_CheckedChanged({ $config.checkOnStart = $chkAuto.Checked; Save-Config $config })
-    $chkDisc.Add_CheckedChanged({ $config.discoverOnStart = $chkDisc.Checked; Save-Config $config })
-
-    $btnBrowse.Add_Click({
-        $fb = New-Object Windows.Forms.FolderBrowserDialog
-        $fb.Description = 'Select your Cyberpunk 2077 folder'
-        if ($txtGame.Text -and (Test-Path -LiteralPath $txtGame.Text)) { $fb.SelectedPath = $txtGame.Text }
-        if ($fb.ShowDialog($form) -eq 'OK') { $txtGame.Text = $fb.SelectedPath; $config.gameDir = $fb.SelectedPath; Save-Config $config; [void](Show-Preflight); Update-UpdHeader }
-    })
-
-    $btnAccounts.Add_Click({
-        $dlg = New-Object Windows.Forms.Form
-        $dlg.Text = 'Accounts'; $dlg.Size = New-Object Drawing.Size(660, 520); $dlg.StartPosition = 'CenterParent'; $dlg.Font = $font; $dlg.FormBorderStyle = 'FixedDialog'
-        $t = New-Object Windows.Forms.TableLayoutPanel; $t.Dock = 'Fill'; $t.ColumnCount = 1; $t.Padding = New-Object Windows.Forms.Padding(12)
-        $mk = {
-            param($text, $linkText, $url)
-            $l = New-Object Windows.Forms.LinkLabel; $l.AutoSize = $true; $l.MaximumSize = New-Object Drawing.Size(610, 0); $l.Text = $text
-            $l.Links.Add($text.IndexOf($linkText), $linkText.Length, $url) | Out-Null
-            $l.Add_LinkClicked({ param($s, $a) Start-Process $a.Link.LinkData })
-            return $l
-        }
-        $l1 = & $mk 'Nexus personal API key (optional; needed to check Nexus mods for updates). Get it at next.nexusmods.com/settings/api-keys, under "Personal API Key".' 'next.nexusmods.com/settings/api-keys' 'https://next.nexusmods.com/settings/api-keys'
-        $k1 = New-Object Windows.Forms.TextBox; $k1.UseSystemPasswordChar = $true; $k1.Width = 610; $k1.Text = $config.nexusKey
-        $l2 = & $mk 'mod.io token: a Personal Access Token (preferred) or an older OAuth 2 access token, with read and write access. Sign in at mod.io/me/access with the SAME account you linked in the game and create it there.' 'mod.io/me/access' 'https://mod.io/me/access'
-        $k2 = New-Object Windows.Forms.TextBox; $k2.UseSystemPasswordChar = $true; $k2.Width = 610; $k2.Text = $config.modioToken
-        $l4 = New-Object Windows.Forms.Label; $l4.AutoSize = $true; $l4.MaximumSize = New-Object Drawing.Size(610, 0)
-        $l4.Text = 'mod.io API path (optional). Leave empty unless mod.io/me/access shows a personal API path such as https://u-12345.modapi.io/v1.'
-        $k4 = New-Object Windows.Forms.TextBox; $k4.Width = 610; $k4.Text = $config.modioApiPath
-        $l3 = & $mk 'GitHub token (optional). App updates come from the public repo github.com/Sirtacoburrito/NightCityInstaller and need no token. Only fill this in if that repo is ever made private.' 'github.com/Sirtacoburrito/NightCityInstaller' 'https://github.com/Sirtacoburrito/NightCityInstaller'
-        $k3 = New-Object Windows.Forms.TextBox; $k3.UseSystemPasswordChar = $true; $k3.Width = 610; $k3.Text = $config.githubToken
-        $res = New-Object Windows.Forms.Label; $res.AutoSize = $true; $res.MaximumSize = New-Object Drawing.Size(610, 0); $res.ForeColor = [Drawing.Color]::DimGray
-        $p = New-Object Windows.Forms.FlowLayoutPanel; $p.AutoSize = $true
-        $test = New-Object Windows.Forms.Button; $test.Text = 'Test'; $test.AutoSize = $true
-        $save = New-Object Windows.Forms.Button; $save.Text = 'Save'; $save.AutoSize = $true; $save.DialogResult = 'OK'
-        $p.Controls.AddRange(@($test, $save))
-        $t.Controls.AddRange(@($l1, $k1, $l2, $k2, $l4, $k4, $l3, $k3, $p, $res)); $dlg.Controls.Add($t)
-        $dlg.Size = New-Object Drawing.Size(660, 600)
-        $test.Add_Click({
-            $out = @()
-            if ($k1.Text.Trim()) {
-                try { $v = Invoke-Nexus 'users/validate.json' $k1.Text.Trim(); $out += "Nexus: signed in as $($v.name)" + $(if ($v.is_premium) { ' (Premium)' } else { ' (free)' }) }
-                catch { $out += 'Nexus: key rejected (' + $_.Exception.Message + ')' }
-            }
-            if ($k2.Text.Trim()) {
-                Set-ModioBase $k4.Text
-                $kind = Get-ModioTokenKind $k2.Text
-                try {
-                    $me = Invoke-Modio Get 'me' $k2.Text.Trim()
-                    $out += "mod.io: signed in as $($me.username). Make sure this is the account linked in the game."
-                    if ($kind -eq 'oauth2') { $out += 'mod.io: this is an OAuth 2 token, which mod.io is phasing out. When you can, create a Personal Access Token on mod.io/me/access and paste it here instead.' }
-                } catch {
-                    $code = Get-HttpStatus $_
-                    $out += if ($code -eq 401) { 'mod.io: token rejected. It may have expired or been revoked; create a new Personal Access Token on mod.io/me/access.' } else { 'mod.io: could not connect (' + $_.Exception.Message + '). If mod.io/me/access shows an API path, paste it in the field above.' }
-                }
-                Set-ModioBase $config.modioApiPath
-            }
-            try {
-                $info = Test-AppUpdate $k3.Text.Trim()
-                $out += if ($info) { "GitHub: connected, app update $($info.version) available" } else { 'GitHub: connected, the app is up to date' }
-            } catch { $out += 'GitHub: ' + $_.Exception.Message }
-            $res.Text = ($out -join [Environment]::NewLine)
-        })
-        if ($dlg.ShowDialog($form) -eq 'OK') {
-            $config.nexusKey = $k1.Text.Trim(); $config.modioToken = $k2.Text.Trim(); $config.githubToken = $k3.Text.Trim(); $config.modioApiPath = $k4.Text.Trim()
-            if ((Get-ModioTokenKind $config.modioToken) -eq 'oauth2') { $ui.Log('mod.io: you are using an OAuth 2 token. It works for now, but mod.io is moving to Personal Access Tokens; swap it when you can.') }
-            if ($engineRef.E) { $engineRef.E.subscribed = $null }
-            Save-Config $config; Update-AccountLabel
-            $ui.Log('Accounts saved.')
-        }
-    })
-
-    $btnRefresh.Add_Click({ if (Show-Preflight) { & $refreshInstalled } })
-    $btnAll.Add_Click({ foreach ($r in $list.Items) { if ((& $lookFor ($r.SubItems[2].Text -replace '^[^A-Za-z]+', '')) -ne 'ok') { $r.Checked = $true } }; & $updateSummary })
-    $btnNone.Add_Click({ foreach ($r in $list.Items) { $r.Checked = $false }; & $updateSummary })
-    $list.Add_ItemChecked({ if ($sumText) { & $updateSummary } })
-    $list.Add_ItemCheck({
-        param($s, $e)
-        $k = [string]$list.Items[$e.Index].Tag
-        if ($e.NewValue -eq [Windows.Forms.CheckState]::Checked -and $locked.Contains($k)) { $e.NewValue = [Windows.Forms.CheckState]::Unchecked }
-    })
-    $btnReset.Add_Click({
-        $a = [Windows.Forms.MessageBox]::Show('Clear all saved install progress? Mods already installed stay installed and are detected again.', $script:AppName, 'YesNo', 'Question')
-        if ($a -eq 'Yes') {
-            foreach ($k in @($state.Keys | Where-Object { $_ -notlike '__*' })) { $state.Remove($k) }
-            Save-State $state
-            foreach ($it in $manifest.items) { $r = $rows[$it.key].row; $r.SubItems[2].Text = ''; $r.SubItems[3].Text = ''; & $setLook $r 'none'; $r.Checked = -not $it.optional }
-            $ui.Log('Install progress cleared.')
-            & $refreshInstalled
-        }
-    })
-
-    $timer = New-Object Windows.Forms.Timer
-    $timer.Interval = 1500
+    # ---------------- timers ----------------
+    $timer = New-Object Windows.Forms.Timer; $timer.Interval = 1500
     $script:Busy = $false
     $timer.Add_Tick({
         if ($script:Busy -or -not $engineRef.E) { return }
@@ -1500,33 +2182,13 @@ function Start-App {
         try {
             Step-Engine $engineRef.E
             if ($engineRef.E.mode -in @('done', 'paused')) {
-                $btnStart.Enabled = $true; $btnPause.Enabled = $false; $btnStart.Text = 'Start'; $btnUpdate.Enabled = $true
-                if ($engineRef.E.mode -eq 'done') { $timer.Stop(); & $refreshInstalled }
+                $btnStart.Enabled = $true; $btnPause.Enabled = $false; $btnStart.Text = [string][char]0x25B6 + '  Start install'; $btnUpdate.Enabled = $true
+                if ($engineRef.E.mode -eq 'done') { $timer.Stop(); & $refreshInstalled; & $runHealth | Out-Null }
             }
         } catch { $ui.Log('Error: ' + $_.Exception.Message) }
         finally { $script:Busy = $false }
     })
-
-    $discTimer = New-Object Windows.Forms.Timer
-    $discTimer.Interval = 300
-    $script:DiscBusy = $false
-    $discTimer.Add_Tick({
-        if ($script:DiscBusy -or -not $engineRef.D) { return }
-        $script:DiscBusy = $true
-        try { Step-Discovery $engineRef.D; if ($engineRef.D.done) { $discTimer.Stop() } }
-        catch { $ui.Log('Discovery error: ' + $_.Exception.Message); $discTimer.Stop() }
-        finally { $script:DiscBusy = $false }
-    })
-    $startDiscovery = {
-        if (-not $config.gameDir -or -not (Test-Path -LiteralPath $config.gameDir)) { return }
-        if (-not $config.nexusKey -and -not $config.modioToken) { $ui.Log('Discovery skipped: add a Nexus key or mod.io token under Accounts.'); return }
-        $engineRef.D = New-Discovery $manifest $config (Read-DiscoveryStore) (Get-InstalledNexusIds $config.gameDir) $ui
-        $ui.Log('Looking for more mods that work with this game version...')
-        $discTimer.Start()
-    }
-
-    $chkTimer = New-Object Windows.Forms.Timer
-    $chkTimer.Interval = 250
+    $chkTimer = New-Object Windows.Forms.Timer; $chkTimer.Interval = 250
     $script:CheckBusy = $false
     $chkTimer.Add_Tick({
         if ($script:CheckBusy -or -not $engineRef.C) { return }
@@ -1535,12 +2197,41 @@ function Start-App {
         catch { $ui.Log('Update check error: ' + $_.Exception.Message); $chkTimer.Stop(); $btnCheck.Enabled = $true }
         finally { $script:CheckBusy = $false }
     })
+    $discTimer = New-Object Windows.Forms.Timer; $discTimer.Interval = 300
+    $script:DiscBusy = $false
+    $discTimer.Add_Tick({
+        if ($script:DiscBusy -or -not $engineRef.D) { return }
+        $script:DiscBusy = $true
+        try { Step-Discovery $engineRef.D; if ($engineRef.D.done) { $discTimer.Stop() } }
+        catch { $ui.Log('Discovery error: ' + $_.Exception.Message); $discTimer.Stop() }
+        finally { $script:DiscBusy = $false }
+    })
+    $startCheck = {
+        if (-not (& $preflight)) { return }
+        if ($engineRef.C -and -not $engineRef.C.done) { return }
+        $updGrid.Rows.Clear()
+        foreach ($k in @($rows.Keys | Where-Object { $_ -like 'upd*' -or $_ -like 'update:*' })) { $rows.Remove($k) }
+        $btnCheck.Enabled = $false; $btnUpdate.Enabled = $false
+        $engineRef.C = New-UpdateChecker $config $state $ui
+        Start-UpdateCheck $engineRef.C
+        $ui.Log('Checking for mod updates...')
+        $chkTimer.Start()
+        & $checkApp $true
+    }
+    $startDiscovery = {
+        if (-not $config.gameDir -or -not (Test-Path -LiteralPath $config.gameDir)) { return }
+        if (-not $config.nexusKey -and -not $config.modioToken) { $ui.Log('Discovery skipped: add a Nexus key or mod.io token in Settings.'); return }
+        $engineRef.D = New-Discovery $manifest $config (Read-DiscoveryStore) (Get-InstalledNexusIds $config.gameDir) $ui
+        $ui.Log('Looking for more mods that work with this game version...')
+        $discTimer.Start()
+    }
 
+    # ---------------- buttons ----------------
     $btnStart.Add_Click({
-        if (-not (Show-Preflight)) { return }
+        if (-not (& $preflight)) { & $showPage 'Settings'; return }
         Save-Config $config
-        $checked = @($list.Items | Where-Object { $_.Checked } | ForEach-Object { [string]$_.Tag })
-        if ($engineRef.E -and $engineRef.E.mode -eq 'paused' -and $engineRef.E.pos -lt $engineRef.E.queue.Count) {
+        $checked = @($grid.Rows | Where-Object { $_.Cells['Q'].Value -eq $true } | ForEach-Object { [string]$_.Tag })
+        if ($engineRef.E -and $engineRef.E.mode -eq 'paused' -and $engineRef.E.pos -lt $engineRef.E.queue.Count -and $engineRef.E.purpose -eq 'install') {
             $engineRef.E.mode = 'running'; $engineRef.E.current = $null
         } else {
             $engineRef.E = New-Engine $manifest $config $state $ui
@@ -1553,52 +2244,94 @@ function Start-App {
         $timer.Start()
     })
     $btnPause.Add_Click({
-        if ($engineRef.E) {
-            if ($engineRef.E.current -and $engineRef.E.mode -eq 'waitNexus') { $engineRef.E.current = $null }
-            $engineRef.E.mode = 'paused'
-        }
-        $ui.Banner('Paused. Click Start to carry on from where you stopped.', @())
-        $btnStart.Text = 'Continue'; $btnStart.Enabled = $true; $btnPause.Enabled = $false
+        if ($engineRef.E) { if ($engineRef.E.current -and $engineRef.E.mode -eq 'waitNexus') { $engineRef.E.current = $null }; $engineRef.E.mode = 'paused' }
+        $ui.Banner('Paused. Click Start install to carry on from where you stopped.', @())
+        $btnStart.Text = [string][char]0x25B6 + '  Continue'; $btnStart.Enabled = $true; $btnPause.Enabled = $false
     })
-
+    $btnRefresh.Add_Click({ if (& $preflight) { & $refreshInstalled } })
+    $btnAll.Add_Click({ foreach ($row in $grid.Rows) { if (-not $locked.Contains([string]$row.Tag) -and $row.Visible) { $row.Cells['Q'].Value = $true } }; & $updateSummary })
+    $btnNone.Add_Click({ foreach ($row in $grid.Rows) { if ($row.Visible) { $row.Cells['Q'].Value = $false } }; & $updateSummary })
+    $btnReset.Add_Click({
+        $a = [Windows.Forms.MessageBox]::Show('Clear all saved install progress? Mods already installed stay installed and are detected again.', 'Night City Installer', 'YesNo', 'Question')
+        if ($a -eq 'Yes') {
+            foreach ($k in @($state.Keys | Where-Object { $_ -notlike '__*' })) { $state.Remove($k) }
+            Save-State $state
+            foreach ($it in $manifest.items) { $e0 = $rows[$it.key]; if ($e0) { & $setLock $e0.row $false; & $setStatusCell $e0.row ''; $e0.row.Cells['Info'].Value = [string]$it.note; $e0.row.Cells['Q'].Value = -not $it.optional } }
+            $ui.Log('Install progress cleared.'); & $refreshInstalled
+        }
+    })
     $btnCheck.Add_Click({ & $startCheck })
     $btnAppUpd.Add_Click({ & $doAppUpdate })
     $btnUpdate.Add_Click({
-        if (Test-EngineBusy) { $ui.Banner('Finish or pause the current install first.', @()); return }
-        if (-not (Show-Preflight)) { return }
-        $picked = @($updList.Items | Where-Object { $_.Checked -and $_.Tag -and $_.Tag.update } | ForEach-Object { $_.Tag } | Sort-Object { Get-UpdateSortKey $_.id $_.name })
+        if (& $engineBusy) { $ui.Banner('Finish or pause the current install first.', @()); return }
+        if (-not (& $preflight)) { return }
+        $picked = @($updGrid.Rows | Where-Object { $_.Cells['Q'].Value -eq $true -and $_.Tag -and $_.Tag.update } | ForEach-Object { $_.Tag } | Sort-Object { Get-UpdateSortKey $_.id $_.name })
         if ($picked.Count -eq 0) { $ui.Banner('Tick the mods you want to update first.', @()); return }
         $engineRef.E = New-Engine $manifest $config $state $ui
         Start-UpdateEngine $engineRef.E $picked
         $btnUpdate.Enabled = $false; $btnStart.Enabled = $false; $btnPause.Enabled = $true
-        $tabs.SelectedTab = $tabUpdates
         $timer.Start()
     })
+    $btnPlay.Add_Click({
+        if (-not (& $preflight)) { & $showPage 'Settings'; return }
+        try { if ($config.autoFix -and (Repair-EmptyModdedCache $config.gameDir)) { $ui.Log('Health: renamed an empty r6\cache\modded folder before launch (it would crash the game).') } } catch {}
+        # Log-based errors describe the LAST launch; launching again is how they clear, so they don't block Play.
+        $issues = @(& $runHealth | Where-Object { $_.level -eq 'error' -and $_.id -notin @('scc-failed', 'redscript-errors') })
+        if ($issues.Count -gt 0) { $ui.Banner('The health check found a problem that can stop the game from starting.', @('Open Health check')); return }
+        $ui.Log('Launching Cyberpunk 2077...')
+        try { Start-Process 'steam://rungameid/1091500' } catch { Start-Process (Join-Path $config.gameDir 'bin\x64\Cyberpunk2077.exe') }
+    })
 
-    # ---- startup
-    Update-AccountLabel
-    Update-UpdHeader
-    $ui.Banner('First run: click Accounts... and add your mod.io token (and, ideally, your Nexus key). Then click Start. mod.io mods install with no further input. For each Nexus mod, click "Slow download" in the page that opens; Vortex does the rest and the app moves on by itself.', @())
-    $ui.Log("$($script:AppName) $($script:AppVersion). $($manifest.items.Count) mods in the list. Progress is saved in $($script:DataDir).")
-    if (Show-Preflight) {
-        $gv = Get-GameVersion $config.gameDir
-        $prev = if ($state.ContainsKey('__gameVersion')) { $state['__gameVersion'].detail } else { '' }
-        if ($gv -and $prev -and $gv -ne $prev) {
-            $ui.Banner("Cyberpunk 2077 was updated from $prev to $gv. Script mods often stop working after a game patch until their frameworks are updated. Open the Updates tab, check for updates and install the framework updates first. If the game won't start, disable mods in Vortex until they catch up.", @())
-            $ui.Log("Game version changed: $prev -> $gv")
+    # ---------------- startup ----------------
+    Write-Trace 'window built'
+    & $showPage 'Mods'
+    & $updateSummary
+    & $updateUpdHeader
+    foreach ($n in $startupNotes) { $ui.Log($n) }
+    $ui.Log("Night City Installer $($script:AppVersion). $($manifest.items.Count) mods in the list. Progress is saved in $($script:DataDir).")
+    $form.Add_Shown({
+        Write-Trace 'shown'
+        $splash.form.Close()
+        $split.SplitterDistance = [Math]::Max(500, $split.Width - 430)
+        if (-not $config.shortcutDone) {
+            try { $p = New-DesktopShortcut $script:Root; $ui.Log("Desktop shortcut created: $p") } catch {}
+            $config.shortcutDone = $true; Save-Config $config
         }
-        if ($gv) { $state['__gameVersion'] = @{ status = ''; detail = $gv; done = $false }; Save-State $state }
-        $form.Add_Shown({ & $refreshInstalled; if ($config.checkOnStart) { & $startCheck }; if ($config.discoverOnStart) { & $startDiscovery } })
-    }
-    [void]$form.ShowDialog()
-    $timer.Stop(); $chkTimer.Stop(); $discTimer.Stop()
+        if (& $preflight) {
+            $gv = Get-GameVersion $config.gameDir
+            $prev = if ($state.ContainsKey('__gameVersion')) { $state['__gameVersion'].detail } else { '' }
+            if ($gv -and $prev -and $gv -ne $prev) {
+                $ui.Banner("Cyberpunk 2077 was updated from $prev to $gv. Script mods often stop working after a game patch until their frameworks are updated. Check the Updates page and install framework updates first.", @())
+                $ui.Log("Game version changed: $prev -> $gv")
+            } elseif (-not $config.modioToken -and -not $config.nexusKey) {
+                $ui.Banner('First run: open Settings and add your mod.io token and Nexus key, then click Start install.', @())
+            }
+            if ($gv) { $state['__gameVersion'] = @{ status = ''; detail = $gv; done = $false }; Save-State $state }
+            & $refreshInstalled
+            $issues = @(& $runHealth)
+            if (@($issues | Where-Object { $_.level -eq 'error' -and $_.id -notin @('scc-failed', 'redscript-errors') }).Count -gt 0) { $ui.Banner('The health check found a problem that can stop the game from starting.', @('Open Health check')) }
+            elseif (@($issues | Where-Object { $_.id -eq 'scc-failed' }).Count -gt 0) { $ui.Banner('Your last game launch failed to compile mod scripts (see Health check). The known cause is fixed; press Play to try again.', @('Open Health check')) }
+            if ($config.checkOnStart) { & $startCheck }
+            if ($config.discoverOnStart) { & $startDiscovery }
+            if ($grid.Rows.Count -gt 0) { $grid.Rows[0].Selected = $true; & $showDetails ([string]$grid.Rows[0].Tag) }
+        }
+    })
+    Write-Trace 'showing dialog'
+    # Application.Run, not ShowDialog: a modal dialog would take the splash as its owner and
+    # close together with it.
+    [Windows.Forms.Application]::Run($form)
+    Write-Trace 'main window closed'
+    $timer.Stop(); $chkTimer.Stop(); $discTimer.Stop(); $detailTimer.Stop(); $imgTimer.Stop()
 }
 
 if (-not $TestMode) {
-    try { Start-App }
+    Write-Trace 'calling Start-App'
+    try { Start-App; Write-Trace 'Start-App returned' }
     catch {
-        try { Ensure-DataDir; Add-Content -LiteralPath (Join-Path $script:DataDir 'log.txt') -Value ('Startup error: ' + $_.Exception.Message) } catch {}
+        $where = "line $($_.InvocationInfo.ScriptLineNumber): $(([string]$_.InvocationInfo.Line).Trim())"
+        Write-Trace ("STARTUP ERROR: " + $_.Exception.ToString() + " AT " + $where)
+        try { Ensure-DataDir; Add-Content -LiteralPath (Join-Path $script:DataDir 'log.txt') -Value ('Startup error: ' + $_.Exception.Message + ' at ' + $where) } catch {}
         Add-Type -AssemblyName System.Windows.Forms
-        [void][Windows.Forms.MessageBox]::Show("Night City Installer couldn't start: $($_.Exception.Message)", 'Night City Installer', 'OK', 'Error')
+        [void][Windows.Forms.MessageBox]::Show("Night City Installer couldn't start: $($_.Exception.Message)`n`nAt $where", 'Night City Installer', 'OK', 'Error')
     }
 }

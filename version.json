@@ -1,22 +1,30 @@
 {
-  "version": "1.3.0",
-  "notes": "Accepts mod.io Personal Access Tokens (and still OAuth 2), with an optional mod.io API path. Finds new 2.5-compatible mods on mod.io and Nexus at start-up and adds them to the list. Installed mods are locked unless an update is available. Fixes the patch date being read in local time.",
+  "version": "1.4.0",
+  "notes": "New Vortex-style window with sidebar, mod details with descriptions and photos, health check that fixes the empty r6\\cache\\modded crash, automatic requirements and manual installs, Play button, new icon and splash screen.",
   "files": [
     {
       "path": "NightCityInstaller.ps1",
-      "sha256": "47AC494EFC7A0A194F48B8356AE9E1B7C2CFDF5C7035942EE37C5DF097D374E7"
+      "sha256": "BA76268A5122F49425F990C64E291EBF779916561A98F9664828435713F05939"
     },
     {
       "path": "manifest.json",
-      "sha256": "3494B0B69E936D79B3882C0E08A666AFB1C6DD7D75CDC11E3EBF65371F77FDE1"
+      "sha256": "BD77B470BF7826E38574A765AC21CDDA72FA647B6C2DF502A19AB70365F30A9D"
     },
     {
       "path": "README.txt",
-      "sha256": "C7390547749E2D4DFCA4DC37B705D405E6DCFD0F9AD0A98A377174266E9AD57C"
+      "sha256": "62FBAF3283BB7D9F79DB4A789F3472BABF3DAE74EF6157BFAEC2573F9BAB16B8"
     },
     {
       "path": "Start Night City Installer.bat",
       "sha256": "61A39983C7374E0FD7FDC99362661F8F2A6EFB772E36D2E86EAEC07CD2DAF01C"
+    },
+    {
+      "path": "NightCityInstaller.ico",
+      "sha256": "DBF35D52F9C6651D91FF0F91C3D6417CEA7B47B04952876AA8697AD248C9665E"
+    },
+    {
+      "path": "NightCityInstaller.png",
+      "sha256": "CF0AEE2FC2836F2DABE60BFE7EB0459B12EA0A0944EFB9F0084B5D71B8436B0F"
     }
   ]
 }

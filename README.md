@@ -7,13 +7,16 @@ A Windows app that installs a stability-checked mod list for **Cyberpunk 2077 pa
 - **Installed mods show in green** with a check mark and are locked unless an update is available, so nothing is downloaded twice.
 - **Finds new mods on start-up**: the official mod.io catalog plus well-used Nexus mods with files from after the patch, filtered for clashes.
 - **mod.io Personal Access Tokens** are supported (older OAuth 2 tokens still work).
+- **Vortex-style window**: sidebar (Mods, Updates, Health check, Settings, Log) and a Play button. Click any mod to see its description, photos from the mod page and its requirements.
+- **Health check**: finds known crash causes, like an empty `r6\cache\modded` folder (renamed, never deleted), script compile errors and files Vortex couldn't place.
+- **Requirements and manual installs**: missing requirements are queued before each mod; files Vortex leaves in `mod-extra-files` are copied to the standard game folders without overwriting, and every file is recorded.
 - **Updates tab**: checks every Vortex-installed Nexus mod and your mod.io subscriptions for newer versions (frameworks first), warns when the game itself is patched, and updates the app from this repo after verifying each file's SHA-256.
 
 ## Use
 
 1. Download this repo (Code > Download ZIP) and extract it anywhere.
 2. Double-click `Start Night City Installer.bat`.
-3. Click **Accounts...** and add a mod.io access token (and, ideally, a Nexus personal API key). Then click **Start**.
+3. Open **Settings** and add a mod.io access token (and, ideally, a Nexus personal API key). Then click **Start install**.
 
 See [README.txt](README.txt) for details. Requires Windows PowerShell 5.1 (built into Windows 10/11) and Vortex.
 

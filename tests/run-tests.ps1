@@ -410,12 +410,12 @@ $script:NexusMods = @{
 function Invoke-RestMethod {
     param($Method = 'Get', $Uri, $Headers, $ContentType, $Body, $TimeoutSec)
     $u = [string]$Uri; [void]$script:Calls.Add($u); $script:LastHeaders = $Headers
-    if ($u -like '*mods/updated.json*') { return @(
+    if ($u -like '*mods/updated.json*') { return ,@(
         [pscustomobject]@{ mod_id = 50001; latest_file_update = $P + 1000 }, [pscustomobject]@{ mod_id = 50002; latest_file_update = $P + 2000 },
         [pscustomobject]@{ mod_id = 50003; latest_file_update = $P + 3000 }, [pscustomobject]@{ mod_id = 50004; latest_file_update = $P + 4000 },
         [pscustomobject]@{ mod_id = 4198; latest_file_update = $P + 5000 }, [pscustomobject]@{ mod_id = 50009; latest_file_update = $P - 9999 }) }
-    if ($u -like '*mods/trending.json') { return @((NX 50010 'Trending Gun Pack' 500 50000 ($P + 100)), (NX 50011 'Old Classic' 900 90000 ($P - 5000))) }
-    if ($u -like '*mods/latest_added.json' -or $u -like '*mods/latest_updated.json') { return @() }
+    if ($u -like '*mods/trending.json') { return ,@((NX 50010 'Trending Gun Pack' 500 50000 ($P + 100)), (NX 50011 'Old Classic' 900 90000 ($P - 5000))) }
+    if ($u -like '*mods/latest_added.json' -or $u -like '*mods/latest_updated.json') { return ,@() }
     if ($u -match 'nexusmods.com/v1/games/cyberpunk2077/mods/(\d+)\.json$') { return $script:NexusMods[[int]$Matches[1]] }
     if ($u -like '*games?name_id=*') { return [pscustomobject]@{ data = @([pscustomobject]@{ id = 5555 }) } }
     if ($u -match 'games/5555/mods\?_limit=100&_offset=0') { return [pscustomobject]@{ data = @(
@@ -499,6 +499,127 @@ $EN = New-Engine $m2 $cfgD @{} $uiE
 Start-Engine $EN @('nexus:5646')
 Step-Engine $EN
 Check 'installed mod without update stays skipped as installed' ($EN.state['nexus:5646'].status -eq 'Already installed')
+
+Remove-Item $tmp -Recurse -Force
+
+
+# ================= 1.4 tests: flat lists, requirements, manual installs, health, console-only =================
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ("ncl-14-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory $tmp | Out-Null
+$script:DataDir = Join-Path $tmp 'data'; $script:ModInfoCache = $null
+$game = Join-Path $tmp 'game'; $staging = Join-Path $tmp 'staging'
+New-Item -ItemType Directory (Join-Path $game 'bin/x64') -Force | Out-Null; New-Item -ItemType Directory $staging | Out-Null
+$dep = Get-Content $DeploymentJson -Raw | ConvertFrom-Json; $dep.stagingPath = $staging
+$dep | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $game 'vortex.deployment.json')
+
+# flat lists (5.1 shape and 7 shape)
+$nested = ,@([pscustomobject]@{ a = 1 }, [pscustomobject]@{ a = 2 })
+Check 'flatten 5.1-style array' ((ConvertTo-FlatList $nested).Count -eq 2)
+Check 'flatten plain array' ((ConvertTo-FlatList @(1, 2, 3)).Count -eq 3)
+Check 'flatten empty' ((ConvertTo-FlatList $null).Count -eq 0)
+
+# requirements from text
+$d1 = "[b]Requirements[/b]<br />- Cyber Engine Tweaks<br />- ArchiveXL<br />- Native Interactions Framework<br />Optional: Appearance Menu Mod<br /><br />[b]Installation[/b]<br />Use Vortex. Compatible with Codeware."
+$r1 = (Get-RequirementsFromText $d1 36373 | % name) -join ','
+Check 'requirements section parsed' ($r1 -eq 'Cyber Engine Tweaks,ArchiveXL,Native Interactions Framework') $r1
+$zh = Get-Content (Join-Path $AppDir '../tests/arasaka-readme.txt') -Raw -ErrorAction SilentlyContinue
+if ($zh) { $r2 = (Get-RequirementsFromText $zh 36373 | % name) -join ','; Check 'Chinese readme requirements' ($r2 -match 'Native Interactions Framework' -and $r2 -match 'ArchiveXL') $r2 }
+Check 'no requirements section' ((Get-RequirementsFromText 'A cool mod that adds hats. Works with AMM.' 1).Count -eq 0)
+Check 'self not required' (-not ((Get-RequirementsFromText 'Requirements: ArchiveXL' 4198) | ? id -eq 4198))
+
+# manual install plans
+$ex = Join-Path $game 'V2077/mod-extra-files'
+function MkFile($p) { New-Item -ItemType Directory (Split-Path $p -Parent) -Force | Out-Null; 'x' | Set-Content $p }
+MkFile "$ex/DocsOnly/README.txt"
+MkFile "$ex/Nested Pack/MyMod v2/archive/pc/mod/nested.archive"
+MkFile "$ex/Nested Pack/MyMod v2/r6/scripts/Nested/a.reds"
+MkFile "$ex/Loose Bits/loose.archive"; MkFile "$ex/Loose Bits/thing.reds"; MkFile "$ex/Loose Bits/thing.yaml"; MkFile "$ex/Loose Bits/weird.bin"
+MkFile "$ex/CetThing/CoolCet/init.lua"; MkFile "$ex/CetThing/CoolCet/modules/a.lua"
+MkFile "$ex/RedModThing/mods/RedModThing/info.json"
+$p0 = Get-ManualInstallPlan "$ex/DocsOnly" 'DocsOnly'
+Check 'docs-only: nothing to copy' ($p0.copy.Count -eq 0 -and $p0.docs.Count -eq 1)
+$p1 = Get-ManualInstallPlan "$ex/Nested Pack" 'Nested Pack'
+Check 'nested game folders found' ((($p1.copy | % dest | sort) -join ',') -eq 'archive/pc/mod/nested.archive,r6/scripts/Nested/a.reds') (($p1.copy | % dest) -join ',')
+$p2 = Get-ManualInstallPlan "$ex/Loose Bits" 'Loose Bits'
+Check 'loose files placed by type' ((($p2.copy | % dest | sort) -join ',') -eq 'archive/pc/mod/loose.archive,r6/scripts/Loose Bits/thing.reds,r6/tweaks/Loose Bits/thing.yaml' -and $p2.unknown.Count -eq 1) (($p2.copy | % dest) -join ',')
+$p3 = Get-ManualInstallPlan "$ex/CetThing" 'CetThing'
+Check 'CET mod folder placed' ((($p3.copy | % dest | sort) -join ',') -eq 'bin/x64/plugins/cyber_engine_tweaks/mods/CoolCet/init.lua,bin/x64/plugins/cyber_engine_tweaks/mods/CoolCet/modules/a.lua') (($p3.copy | % dest) -join ',')
+$p4 = Get-ManualInstallPlan "$ex/RedModThing" 'RedModThing'
+Check 'REDmod detected' ($p4.redmod)
+MkFile (Join-Path $game 'archive/pc/mod/loose.archive')
+$res = Invoke-ManualInstall $game $p2 'nexus:99'
+Check 'manual install copies, never overwrites' ($res.copied.Count -eq 2 -and $res.skipped.Count -eq 1 -and (Test-Path (Join-Path $game 'r6/scripts/Loose Bits/thing.reds')))
+Check 'manual install recorded' ((Get-Content (Join-Path $script:DataDir 'manual-installs.json') -Raw) -match 'thing.reds')
+Check 'extra folder found by name' ((Get-ExtraFilesFolder $game 'Loose Bits' 0) -like '*Loose Bits')
+
+# health + crash guard
+New-Item -ItemType Directory (Join-Path $game 'r6/cache/modded') -Force | Out-Null
+New-Item -ItemType Directory (Join-Path $game 'red4ext/logs') -Force | Out-Null
+"[2026-11-04 02:04:26.141] [warning ] [ 78908] [RED4ext] scc invocation failed with an error: Failed to load the original script cache" | Set-Content (Join-Path $game 'red4ext/logs/red4ext-2026-11-04-02-04-05.log')
+$h = Get-HealthIssues $game
+Check 'health: empty modded cache' (@($h | ? id -eq 'empty-modded-cache').Count -eq 1)
+Check 'health: scc failure' (@($h | ? id -eq 'scc-failed').Count -eq 1 -and (@($h | ? id -eq 'scc-failed')[0].detail -match 'original script cache'))
+Check 'health: parked files' (@($h | ? id -like 'extra:*').Count -ge 3)
+Check 'health: REDmod mod' (@($h | ? id -like 'redmod:*').Count -eq 1)
+Check 'repair renames empty folder' ((Repair-EmptyModdedCache $game) -and -not (Test-Path (Join-Path $game 'r6/cache/modded')) -and @(Get-ChildItem (Join-Path $game 'r6/cache') -Directory | ? Name -like '_modded_empty_*').Count -eq 1)
+New-Item -ItemType Directory (Join-Path $game 'r6/cache/modded') -Force | Out-Null; 'x' | Set-Content (Join-Path $game 'r6/cache/modded/final.redscripts')
+Check 'repair leaves a filled folder alone' (-not (Repair-EmptyModdedCache $game) -and (Test-Path (Join-Path $game 'r6/cache/modded/final.redscripts')))
+
+# engine: requirement first, dependent held when the requirement has no 2.5 file
+$P2 = [long]([datetimeoffset][datetime]'2026-10-22T00:00:00Z').ToUnixTimeSeconds()
+$script:Calls = New-Object System.Collections.ArrayList
+function Invoke-RestMethod {
+    param($Method = 'Get', $Uri, $Headers, $ContentType, $Body, $TimeoutSec)
+    $u = [string]$Uri; [void]$script:Calls.Add($u)
+    if ($u -match 'nexusmods.com/v1/games/cyberpunk2077/mods/(\d+)\.json$') {
+        $id = [int]$Matches[1]
+        $desc = if ($id -eq 36373) { 'Requirements<br />- Cyber Engine Tweaks<br />- Native Interactions Framework 1.1.4+' } else { 'A mod.' }
+        return [pscustomobject]@{ mod_id = $id; name = "Mod $id"; summary = 's'; description = $desc; author = 'a'; version = '1'; endorsement_count = 50; mod_downloads = 5000; picture_url = "https://img/$id.jpg"; contains_adult_content = $false; available = $true; status = 'published'; updated_timestamp = $P2 + 10 }
+    }
+    if ($u -match 'mods/(\d+)/files.json') {
+        $id = [int]$Matches[1]
+        $ts = if ($id -eq 21422) { $P2 - 86400 } else { $P2 + 3600 }
+        return [pscustomobject]@{ files = @([pscustomobject]@{ file_id = $id * 10; version = '1.0'; category_name = 'MAIN'; is_primary = $true; uploaded_timestamp = $ts; file_name = "x-$id-1-0.zip" }) }
+    }
+    if ($u -like '*/v1/me') { return [pscustomobject]@{ username = 'tester' } }
+    if ($u -like '*me/subscribed*') { return [pscustomobject]@{ data = @() } }
+    if ($u -like '*games?name_id=*') { return [pscustomobject]@{ data = @([pscustomobject]@{ id = 5555 }) } }
+    if ($u -match 'games/5555/mods\?_q=Quickhack') { if ($Headers.ContainsKey('X-Modio-Platform')) { return [pscustomobject]@{ data = @() } } else { return [pscustomobject]@{ data = @([pscustomobject]@{ id = 801; name = 'Quickhack Loadouts' }) } } }
+    if ($u -match 'games/5555/mods\?_q=') { return [pscustomobject]@{ data = @() } }
+    throw "Unmocked $u"
+}
+$opened4 = New-Object System.Collections.ArrayList
+$uiR = [pscustomobject]@{}
+$uiR | Add-Member ScriptMethod Log { param($m) }
+$uiR | Add-Member ScriptMethod SetStatus { param($k, $s, $d) }
+$uiR | Add-Member ScriptMethod Banner { param($t, $b) }
+$uiR | Add-Member ScriptMethod OpenUrl { param($u) [void]$opened4.Add($u) }
+$addedRows = New-Object System.Collections.ArrayList
+$uiR | Add-Member ScriptMethod AddItem { param($it) [void]$addedRows.Add($it.key) }
+$mR = Load-Manifest (Join-Path $AppDir 'manifest.json')
+$cfgR = @{ gameDir = $game; nexusKey = 'K'; modioToken = 'T'; githubToken = ''; modioGameId = 5555; pauseBetweenBatches = $false; checkOnStart = $true; modioApiPath = ''; discoverOnStart = $true }
+$ER = New-Engine $mR $cfgR @{} $uiR
+Start-Engine $ER @('nexus:36373', 'modio:Quickhack Loadouts')
+$g = 0; while ($ER.mode -ne 'done' -and $g -lt 50) { $g++; Step-Engine $ER }
+Check 'console-only mod.io mod recognised' ($ER.state['modio:Quickhack Loadouts'].status -eq 'Console only' -and $ER.state['modio:Quickhack Loadouts'].done)
+Check 'requirement queued before dependent' ((($ER.queue | % key) -join ',') -eq 'modio:Quickhack Loadouts,nexus:21422,nexus:36373') (($ER.queue | % key) -join ',')
+Check 'requirement without 2.5 file waits' ($ER.state['nexus:21422'].status -eq 'Waiting for 2.5 update')
+Check 'dependent held for its requirement' ($ER.state['nexus:36373'].status -eq 'Needs Native Interactions Framework' -and -not $ER.state['nexus:36373'].done) $ER.state['nexus:36373'].status
+Check 'no download page opened for held mod' ($opened4.Count -eq 0)
+Check 'requirement added to the list' ($addedRows -contains 'nexus:21422' -or (Test-InManifest $mR 'nexus:21422'))
+Check 'mod info cached with picture' ((Get-ModInfoCache)['nexus:36373'].images[0] -eq 'https://img/36373.jpg')
+
+# post-install: parked files placed + readme requirement picked up
+$EP = New-Engine $mR $cfgR @{} $uiR
+Start-Engine $EP @('nexus:36108')
+Step-Engine $EP
+Check 'waiting for click (36108)' ($EP.mode -eq 'waitNexus')
+MkFile "$ex/Sell Apartments/SellApartments/archive/pc/mod/sa.archive"
+"Requirements:`n- Audioware" | Set-Content "$ex/Sell Apartments/README.txt"
+New-Item -ItemType Directory (Join-Path $staging 'Sell Apartments-36108-1-0-1-1761600000') | Out-Null
+Step-Engine $EP
+Check 'post-install placed parked archive' (Test-Path (Join-Path $game 'archive/pc/mod/sa.archive'))
+Check 'post-install queued readme requirement next' ($EP.queue.Count -ge 2 -and $EP.queue[1].key -eq 'nexus:12001') (($EP.queue | % key) -join ',')
 
 Remove-Item $tmp -Recurse -Force
 

@@ -1,11 +1,20 @@
-NIGHT CITY INSTALLER 1.3
+NIGHT CITY INSTALLER 1.4
 Installs the "Night City Load Order" mod list for Cyberpunk 2077 patch 2.5, in order.
 
 START
-  Double-click "Start Night City Installer.bat".
+  Double-click "Start Night City Installer.bat" (or the "Night City Installer" desktop shortcut
+  the app creates on first run).
+
+THE WINDOW (laid out like Vortex)
+  Left sidebar: Mods, Updates, Health check, Settings, Log, and a big Play button.
+  Mods: every mod in the list with a status pill, version, category and source. Click any row
+  to see its description, photos from the mod page, its requirements (marked [installed] or
+  [MISSING]) and the author's install notes. "All photos" and "Open mod page" open the page.
+  Filter by name, category or status above the list.
+  Play: fixes known crash causes first (see Health check), then starts the game through Steam.
 
 FIRST RUN (one time, about 3 minutes)
-  1. Click "Accounts...".
+  1. Open Settings in the sidebar.
   2. mod.io token (needed for the mod.io mods):
      mod.io is replacing OAuth 2 access tokens with Personal Access Tokens. The app accepts
      either in the same box, and tells you when you're still on an OAuth 2 token.
@@ -27,7 +36,7 @@ IN VORTEX (check once)
 
 NEW MODS FOUND AUTOMATICALLY
   Each time the app opens it looks for more mods that work with your game version and adds them
-  at the bottom of the list (turn this off on the Updates tab):
+  at the bottom of the list (turn this off in Settings):
   - mod.io: every mod in the official catalog that isn't in the list yet. CD PROJEKT RED approves
     these for the current patch, so they are ticked (mature ones unticked).
   - Nexus (needs your Nexus key): mods with a file uploaded since the patch, at least 10
@@ -107,12 +116,28 @@ OPTIONS
   - Already-installed mods are detected and skipped.
 
 WHAT IT DOES AND DOESN'T TOUCH
-  - It never writes to your game folder. Vortex installs every Nexus mod, so you can disable or
-    remove any of them in Vortex as usual. It only reads vortex.deployment.json and Vortex's
-    staging folder to see what's installed.
+  - Vortex installs every Nexus mod, so you can disable or remove them in Vortex as usual.
+    The app only writes to the game folder for manual installs (new files only, all recorded)
+    and to rename an empty r6\cache\modded folder. It never deletes your files.
   - Keys are stored encrypted for your Windows user (DPAPI) in
     %LOCALAPPDATA%\NightCityInstaller, and are sent only to api.nexusmods.com and api.mod.io.
   - Log file: %LOCALAPPDATA%\NightCityInstaller\log.txt
+
+HEALTH CHECK (sidebar)
+  Runs on start-up and before Play. It looks for:
+  - An empty r6\cache\modded folder. This makes the game crash on start ("Failed to load the
+    original script cache"). Fix renames it to _modded_empty_<time>; nothing is deleted.
+  - Script compile errors from the last launch (redscript / RED4ext logs).
+  - Files Vortex couldn't place (V2077\mod-extra-files). Fix installs them by hand, see below.
+  - Mods that need the REDmod DLC.
+
+REQUIREMENTS AND MANUAL INSTALLS
+  - Before each Nexus mod, the app reads its "Requirements" section and queues any missing
+    requirement first. If a requirement can't be installed, the mod waits ("Needs ...").
+  - After each install it checks whether Vortex left files it couldn't place. If so it copies them
+    into the standard Cyberpunk folders (archive\pc\mod, r6\scripts, r6\tweaks, bin\x64\plugins
+    \cyber_engine_tweaks\mods, red4ext\plugins), never overwriting anything, and records each file in
+    %LOCALAPPDATA%\NightCityInstaller\manual-installs.json so it can be removed later.
 
 IF SOMETHING GOES WRONG
   - "Still waiting" for a Nexus mod: click "Open page again", or "It's installed" if Vortex

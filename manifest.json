@@ -138,608 +138,704 @@
       "batch": 11,
       "source": "modio",
       "query": "Deceptious Quest Core",
-      "name": "Deceptious Quest Core"
+      "name": "Deceptious Quest Core",
+      "desc": "The shared base for Deceptious's quest and interaction mods. Adds nothing on its own."
     },
     {
       "batch": 11,
       "source": "modio",
       "query": "Deceptious Bug Fixes",
-      "name": "Deceptious Bug Fixes [DQC]"
+      "name": "Deceptious Bug Fixes [DQC]",
+      "desc": "Fixes for the Deceptious mods themselves. Install it with the core."
     },
     {
       "batch": 12,
       "source": "modio",
       "query": "One More Light",
-      "name": "New Quest - One More Light [DQC]"
+      "name": "New Quest - One More Light [DQC]",
+      "desc": "A new quest at the North Oak Columbarium after Jackie's ofrenda."
     },
     {
       "batch": 12,
       "source": "modio",
       "query": "Hot Fuzz",
-      "name": "New Quest - Hot Fuzz [DQC]"
+      "name": "New Quest - Hot Fuzz [DQC]",
+      "desc": "A community-made side quest."
     },
     {
       "batch": 12,
       "source": "modio",
       "query": "Encore",
-      "name": "New Quest - Encore [DQC]"
+      "name": "New Quest - Encore [DQC]",
+      "desc": "The Encore side quest."
     },
     {
       "batch": 12,
       "source": "modio",
       "query": "Night City Interactions",
-      "name": "Night City Interactions"
+      "name": "Night City Interactions",
+      "desc": "Adds activities across Night City's districts."
     },
     {
       "batch": 13,
       "source": "modio",
       "query": "Immersive Rippers",
-      "name": "Immersive Rippers"
+      "name": "Immersive Rippers",
+      "desc": "Ripperdoc visits play out in the chair instead of a menu."
     },
     {
       "batch": 13,
       "source": "modio",
       "query": "Immersive Rippers Dogtown",
-      "name": "Immersive Rippers - Dogtown"
+      "name": "Immersive Rippers - Dogtown",
+      "desc": "The same treatment for Dogtown's ripperdocs. Needs Phantom Liberty to matter."
     },
     {
       "batch": 13,
       "source": "modio",
       "query": "Idle Anywhere",
-      "name": "Idle Anywhere [DQC]"
+      "name": "Idle Anywhere [DQC]",
+      "desc": "Smoke, drink or eat while idling almost anywhere."
     },
     {
       "batch": 13,
       "source": "modio",
       "query": "TV Anywhere",
-      "name": "TV Anywhere [DQC]"
+      "name": "TV Anywhere [DQC]",
+      "desc": "Watch TVs you find around the city, not just the scripted ones."
     },
     {
       "batch": 13,
       "source": "modio",
       "query": "Computer Anywhere",
-      "name": "Computer Anywhere [DQC]"
+      "name": "Computer Anywhere [DQC]",
+      "desc": "Use computers in more places."
     },
     {
       "batch": 13,
       "source": "modio",
       "query": "Scannable Stash",
-      "name": "Scannable Stash [DQC]"
+      "name": "Scannable Stash [DQC]",
+      "desc": "Scan a stash to see what's inside it."
     },
     {
       "batch": 13,
       "source": "modio",
       "query": "Weeee",
-      "name": "Weeee (New H10 Exit) [DQC]"
+      "name": "Weeee (New H10 Exit) [DQC]",
+      "desc": "A faster way out of Megabuilding H10."
     },
     {
       "batch": 13,
       "source": "modio",
       "query": "Apartment Birds",
-      "name": "Apartment Birds [DQC]"
+      "name": "Apartment Birds [DQC]",
+      "desc": "Birds in V's apartment."
     },
     {
       "batch": 13,
       "source": "modio",
       "query": "Interactive Judy's Apartment Devices",
-      "name": "QoL - Interactive Judy's Apartment Devices"
+      "name": "QoL - Interactive Judy's Apartment Devices",
+      "desc": "Use the TV and radio in Judy's apartment."
     },
     {
       "batch": 13,
       "source": "modio",
       "query": "Here's Brendan",
-      "name": "Here's Brendan"
+      "name": "Here's Brendan",
+      "desc": "More interactions with Brendan the vending machine."
     },
     {
       "batch": 13,
       "source": "modio",
       "query": "Roller Coaster Enhanced",
-      "name": "Roller Coaster Enhanced"
+      "name": "Roller Coaster Enhanced",
+      "desc": "Improves the roller coaster ride."
     },
     {
       "batch": 13,
       "source": "modio",
       "query": "Orbital Air Traffic Enhanced",
-      "name": "Orbital Air Traffic Enhanced"
+      "name": "Orbital Air Traffic Enhanced",
+      "desc": "More aerial vehicle traffic in the skyline."
     },
     {
       "batch": 14,
       "source": "modio",
       "query": "Borg Malorian Restored",
-      "name": "Borg Malorian Restored"
+      "name": "Borg Malorian Restored",
+      "desc": "Gives Johnny's Malorian Arms 3516 back its ricochets and penetration."
     },
     {
       "batch": 14,
       "source": "modio",
       "query": "Body Shield",
-      "name": "Body Shield"
+      "name": "Body Shield",
+      "desc": "Reworks using grabbed enemies as human shields."
     },
     {
       "batch": 14,
       "source": "modio",
       "query": "Buttslinger Quickmelee",
-      "name": "Buttslinger Quickmelee"
+      "name": "Buttslinger Quickmelee",
+      "desc": "A gun's quick-melee hit staggers harder."
     },
     {
       "batch": 14,
       "source": "modio",
       "query": "Challenging Breach Minigame",
       "name": "Challenging Breach Minigame",
-      "exclude": "0.5x"
+      "exclude": "0.5x",
+      "desc": "The breach timer starts right away instead of waiting for your first pick."
     },
     {
       "batch": 14,
       "source": "modio",
       "query": "Quickhack Loadouts",
-      "name": "Quickhack Loadouts"
+      "name": "Quickhack Loadouts",
+      "desc": "Swap between saved sets of quickhacks."
     },
     {
       "batch": 14,
       "source": "modio",
       "query": "Clear Skill Checks",
-      "name": "Clear Skill Checks"
+      "name": "Clear Skill Checks",
+      "desc": "Dialogue options show the attribute and level needed more clearly."
     },
     {
       "batch": 14,
       "source": "modio",
       "query": "Better Armor Tooltip",
-      "name": "Better Armor Tooltip"
+      "name": "Better Armor Tooltip",
+      "desc": "Clearer armor numbers in tooltips."
     },
     {
       "batch": 14,
       "source": "modio",
       "query": "Fluff Vendor Fixes",
-      "name": "Fluff Vendor Fixes"
+      "name": "Fluff Vendor Fixes",
+      "desc": "Fixes a broken vendor."
     },
     {
       "batch": 14,
       "source": "modio",
       "query": "Longer Car Delivery Timers",
-      "name": "Longer Car Delivery Timers"
+      "name": "Longer Car Delivery Timers",
+      "desc": "Changes the cooldown before you can call a car again."
     },
     {
       "batch": 14,
       "source": "modio",
       "query": "Faster Checkpoints",
-      "name": "QoL - Faster Checkpoints"
+      "name": "QoL - Faster Checkpoints",
+      "desc": "Shorter vehicle inspections at the Dogtown gates."
     },
     {
       "batch": 14,
       "source": "modio",
       "query": "Easier Sprint Activation",
-      "name": "Easier Sprint Activation"
+      "name": "Easier Sprint Activation",
+      "desc": "Fixes a bug that makes sprint hard to trigger. Mainly useful on a controller."
     },
     {
       "batch": 15,
       "source": "modio",
       "optional": true,
       "query": "Natural Eye Colours",
-      "name": "Natural Eye Colours"
+      "name": "Natural Eye Colours",
+      "desc": "More natural eye colors for V."
     },
     {
       "batch": 15,
       "source": "modio",
       "optional": true,
       "query": "E3 Cyberware",
-      "name": "E3 - Cyberware 01"
+      "name": "E3 - Cyberware 01",
+      "desc": "Facial cyberware textures modelled on the 2018 E3 demo."
     },
     {
       "batch": 15,
       "source": "modio",
       "optional": true,
       "query": "E3 Complexion",
-      "name": "E3 Complexion (with make-up)"
+      "name": "E3 Complexion (with make-up)",
+      "desc": "Skin texture with make-up based on the E3 demo."
     },
     {
       "batch": 15,
       "source": "modio",
       "optional": true,
       "query": "Christy Ponytail Hair",
-      "name": "HoV - Christy Ponytail Hair FEM V"
+      "name": "HoV - Christy Ponytail Hair FEM V",
+      "desc": "House of Vesna hairstyle for female V: a sleek high ponytail."
     },
     {
       "batch": 15,
       "source": "modio",
       "optional": true,
       "query": "Christy Buns Hair",
-      "name": "HoV - Christy Buns Hair FEM V"
+      "name": "HoV - Christy Buns Hair FEM V",
+      "desc": "House of Vesna hairstyle for female V: twin buns."
     },
     {
       "batch": 15,
       "source": "modio",
       "optional": true,
       "query": "Christy Crown Hair",
-      "name": "HoV - Christy Crown Hair FEM V"
+      "name": "HoV - Christy Crown Hair FEM V",
+      "desc": "House of Vesna hairstyle for female V: a braided crown."
     },
     {
       "batch": 15,
       "source": "modio",
       "optional": true,
       "query": "Neo-Princess Hair",
-      "name": "HoV - Neo-Princess Hair FEM V"
+      "name": "HoV - Neo-Princess Hair FEM V",
+      "desc": "House of Vesna hairstyle for female V: long Neo-Princess style."
     },
     {
       "batch": 15,
       "source": "modio",
       "optional": true,
       "query": "Neo-P Glam",
-      "name": "HoV - Neo-P Glam ver Hair FEM V"
+      "name": "HoV - Neo-P Glam ver Hair FEM V",
+      "desc": "House of Vesna hairstyle for female V: glam version of Neo-Princess."
     },
     {
       "batch": 15,
       "source": "modio",
       "optional": true,
       "query": "Anime Pigtails Hair",
-      "name": "HoV - Anime Pigtails Hair"
+      "name": "HoV - Anime Pigtails Hair",
+      "desc": "House of Vesna hairstyle: anime-inspired pigtails."
     },
     {
       "batch": 15,
       "source": "modio",
       "optional": true,
       "query": "Actually Black Hair Color",
-      "name": "HoV - Actually Black Hair Color"
+      "name": "HoV - Actually Black Hair Color",
+      "desc": "Adds a true jet-black hair colour to character creation."
     },
     {
       "batch": 15,
       "source": "modio",
       "optional": true,
       "query": "Actually Platinum Blond",
-      "name": "HoV - Actually Platinum Blond (pick one)"
+      "name": "HoV - Actually Platinum Blond (pick one)",
+      "desc": "Adds a true platinum blonde hair colour."
     },
     {
       "batch": 15,
       "source": "modio",
       "optional": true,
       "query": "Vesnace Lips",
-      "name": "HoV - Vesnace lip colors"
+      "name": "HoV - Vesnace lip colors",
+      "desc": "Extra lipstick colours for character creation."
     },
     {
       "batch": 1,
       "source": "nexus",
       "id": 4575,
-      "name": "Input Loader"
+      "name": "Input Loader",
+      "desc": "Lets mods register their own hotkeys. A small framework many mods on this list need."
     },
     {
       "batch": 2,
       "source": "nexus",
       "id": 5646,
-      "name": "Wannabe Edgerunner"
+      "name": "Wannabe Edgerunner",
+      "desc": "Brings back Humanity. Heavy chrome causes glitches and, at the bottom, cyberpsychosis."
     },
     {
       "batch": 2,
       "source": "nexus",
       "id": 7616,
-      "name": "Stealthrunner"
+      "name": "Stealthrunner",
+      "desc": "Optional stealth objectives on gigs, with rewards and a stealth perk tree. A counterweight to your loud combat setup."
     },
     {
       "batch": 2,
       "source": "nexus",
       "id": 2217,
-      "name": "Lifepath Bonuses and Gang-Corp Traits"
+      "name": "Lifepath Bonuses and Gang-Corp Traits",
+      "desc": "Gives factions their own resistances and weaknesses, and makes your lifepath matter in play."
     },
     {
       "batch": 2,
       "source": "nexus",
       "id": 4070,
-      "name": "Silent Silencers and Throwing Knives"
+      "name": "Silent Silencers and Throwing Knives",
+      "desc": "A failed silenced or knife kill no longer alerts the whole room."
     },
     {
       "batch": 2,
       "source": "nexus",
       "id": 9302,
-      "name": "RipperDeck"
+      "name": "RipperDeck",
+      "desc": "Manage installed cyberware from the Hub menu, without visiting a ripperdoc."
     },
     {
       "batch": 2,
       "source": "nexus",
       "id": 3543,
-      "name": "Zoomable Scopes"
+      "name": "Zoomable Scopes",
+      "desc": "Adjust scope zoom with the mouse wheel while aiming."
     },
     {
       "batch": 2,
       "source": "nexus",
       "id": 2557,
-      "name": "Always First Equip"
+      "name": "Always First Equip",
+      "desc": "Brings back the stylish first-draw weapon animations and adds a hotkey to inspect your weapon."
     },
     {
       "batch": 2,
       "source": "nexus",
       "id": 15043,
-      "name": "New Game Plus - Native"
+      "name": "New Game Plus - Native",
+      "desc": "Carries your level, gear and garage into a fresh playthrough. Only does anything when you start a new game."
     },
     {
       "batch": 3,
       "source": "nexus",
       "id": 2675,
-      "name": "Immersive First Person"
+      "name": "Immersive First Person",
+      "desc": "Shows more of V's body in first person and adds FreeLook."
     },
     {
       "batch": 3,
       "source": "nexus",
       "id": 3196,
-      "name": "Weather Probability Rebalance"
+      "name": "Weather Probability Rebalance",
+      "desc": "Rain, acid rain and sandstorms actually show up instead of endless sun. No dependencies and no performance cost."
     },
     {
       "batch": 3,
       "source": "nexus",
       "id": 5115,
-      "name": "Immersive Timeskip"
+      "name": "Immersive Timeskip",
+      "desc": "Skip time while you watch the city change, instead of a menu fade."
     },
     {
       "batch": 3,
       "source": "nexus",
       "id": 4591,
-      "name": "RadioExt"
+      "name": "RadioExt",
+      "desc": "Add your own radio stations to cars and world radios."
     },
     {
       "batch": 3,
       "source": "nexus",
       "id": 2913,
-      "name": "Simple Flashlight"
+      "name": "Simple Flashlight",
+      "desc": "A toggleable flashlight for dark interiors."
     },
     {
       "batch": 4,
       "source": "nexus",
       "id": 5208,
-      "name": "Let There Be Flight"
+      "name": "Let There Be Flight",
+      "desc": "Every car can fly."
     },
     {
       "batch": 5,
       "source": "nexus",
       "id": 17642,
-      "name": "Revised Backpack"
+      "name": "Revised Backpack",
+      "desc": "A sortable, searchable inventory with bulk junk handling. Helpful with all the loot LootBeam surfaces."
     },
     {
       "batch": 5,
       "source": "nexus",
       "id": 7238,
-      "name": "Quickhack Hotkeys"
+      "name": "Quickhack Hotkeys",
+      "desc": "Fire quickhacks with the number keys."
     },
     {
       "batch": 5,
       "source": "nexus",
       "id": 3096,
-      "name": "Custom Quickslots"
+      "name": "Custom Quickslots",
+      "desc": "A quickslot row for consumables, grenades and cyberware abilities."
     },
     {
       "batch": 5,
       "source": "nexus",
       "id": 4583,
-      "name": "In-World Navigation"
+      "name": "In-World Navigation",
+      "desc": "Holographic route arrows on the road, so you can drive without watching the minimap."
     },
     {
       "batch": 5,
       "source": "nexus",
       "id": 5202,
-      "name": "Autoloot"
+      "name": "Autoloot",
+      "desc": "Picks up all loot in view with one key, and skips quest items and iconics."
     },
     {
       "batch": 5,
       "source": "nexus",
       "id": 3400,
-      "name": "Filter Saves by Lifepath and Type"
+      "name": "Filter Saves by Lifepath and Type",
+      "desc": "Filters the load menu by lifepath, character and save type. Useful once you have modded and New Game Plus saves side by side."
     },
     {
       "batch": 6,
       "source": "nexus",
       "id": 6945,
-      "name": "Equipment-EX"
+      "name": "Equipment-EX",
+      "desc": "50+ clothing slots and unlimited saved outfits."
     },
     {
       "batch": 6,
       "source": "nexus",
       "id": 16310,
-      "name": "LUT Switcher 3"
+      "name": "LUT Switcher 3",
+      "desc": "Change color grading live from an in-game menu."
     },
     {
       "batch": 7,
       "source": "nexus",
       "id": 4454,
-      "name": "Virtual Car Dealer"
+      "name": "Virtual Car Dealer",
+      "desc": "A car shop on your apartment computer that sells modded vehicles."
     },
     {
       "batch": 8,
       "source": "nexus",
       "id": 4378,
-      "name": "Enhanced Craft"
+      "name": "Enhanced Craft",
+      "desc": "Rename crafted weapons, pick their look and craft any variant you've unlocked."
     },
     {
       "batch": 9,
       "source": "nexus",
       "id": 9209,
-      "name": "FX Begone"
+      "name": "FX Begone",
+      "desc": "Turns off chosen screen effects like chromatic aberration, lens flares and damage overlays. Can slightly improve performance."
     },
     {
       "batch": 10,
       "source": "nexus",
       "id": 6328,
-      "name": "Untrack Quest Ultimate"
+      "name": "Untrack Quest Ultimate",
+      "desc": "Untrack all quests so you can explore without waypoints."
     },
     {
       "batch": 16,
       "source": "nexus",
       "id": 17980,
-      "name": "Quest Trigger Fixes"
+      "name": "Quest Trigger Fixes",
+      "desc": "Fixes quests that fail to trigger or progress."
     },
     {
       "batch": 16,
       "source": "nexus",
       "id": 36618,
-      "name": "Stealth Hit Damage Fix for 2.50"
+      "name": "Stealth Hit Damage Fix for 2.50",
+      "desc": "Restores correct stealth-attack damage on 2.50."
     },
     {
       "batch": 16,
       "source": "nexus",
       "id": 36151,
-      "name": "Various Stamina Bug Fix for 2.5"
+      "name": "Various Stamina Bug Fix for 2.5",
+      "desc": "Fixes stamina drain bugs added in 2.5."
     },
     {
       "batch": 16,
       "source": "nexus",
       "id": 35867,
       "name": "Modded Save Loading Screen Fix",
-      "verify": true
+      "verify": true,
+      "desc": "Fixes the loading screen for saves flagged as modded."
     },
     {
       "batch": 16,
       "source": "nexus",
       "id": 36548,
       "name": "HKGN No Track Radio Fix",
-      "verify": true
+      "verify": true,
+      "desc": "Fixes a radio station that plays no tracks."
     },
     {
       "batch": 17,
       "source": "nexus",
       "id": 21929,
-      "name": "Unlimited Reset Attributes"
+      "name": "Unlimited Reset Attributes",
+      "desc": "Respec attributes as often as you like."
     },
     {
       "batch": 17,
       "source": "nexus",
       "id": 36374,
       "name": "More Weapon Loadouts",
-      "verify": true
+      "verify": true,
+      "desc": "Save and swap more weapon loadouts."
     },
     {
       "batch": 17,
       "source": "nexus",
       "id": 35874,
       "name": "Cyberware Loadouts",
-      "verify": true
+      "verify": true,
+      "desc": "Save and swap sets of cyberware."
     },
     {
       "batch": 17,
       "source": "nexus",
       "id": 10476,
-      "name": "Arasaka Cyberware OS MK6 2.0"
+      "name": "Arasaka Cyberware OS MK6 2.0",
+      "desc": "Adds an Arasaka operating system cyberware."
     },
     {
       "batch": 17,
       "source": "nexus",
       "id": 36765,
       "name": "Trinity - Hybrid Operating System",
-      "verify": true
+      "verify": true,
+      "desc": "A hybrid cyberdeck / Sandevistan / Berserk OS."
     },
     {
       "batch": 17,
       "source": "nexus",
       "id": 36165,
       "name": "Cyberplus - Extra Cyberware",
-      "verify": true
+      "verify": true,
+      "desc": "Adds new cyberware pieces."
     },
     {
       "batch": 17,
       "source": "nexus",
       "id": 36207,
       "name": "Cyberarm Switcher",
-      "verify": true
+      "verify": true,
+      "desc": "Swap cyberarm looks and types quickly."
     },
     {
       "batch": 18,
       "source": "nexus",
       "id": 35922,
-      "name": "Curbside - Improved Vehicle Summoning"
+      "name": "Curbside - Improved Vehicle Summoning",
+      "desc": "Summoned cars park properly at the curb near you."
     },
     {
       "batch": 18,
       "source": "nexus",
       "id": 36098,
-      "name": "Wheelman - Vehicle First Person Camera and FOV"
+      "name": "Wheelman - Vehicle First Person Camera and FOV",
+      "desc": "Adjust first-person camera position and FOV in cars."
     },
     {
       "batch": 18,
       "source": "nexus",
       "id": 5167,
-      "name": "Bike Overhaul 2.5"
+      "name": "Bike Overhaul 2.5",
+      "desc": "Reworks motorcycle handling."
     },
     {
       "batch": 19,
       "source": "nexus",
       "id": 21936,
-      "name": "Visual Holsters (Edgerunners 2 Update)"
+      "name": "Visual Holsters (Edgerunners 2 Update)",
+      "desc": "Shows holstered weapons on V's body."
     },
     {
       "batch": 19,
       "source": "nexus",
       "id": 36809,
       "name": "Immersive Audio Distance",
-      "verify": true
+      "verify": true,
+      "desc": "More realistic falloff for distant sounds."
     },
     {
       "batch": 19,
       "source": "nexus",
       "id": 36373,
       "name": "Turn Arasaka Estate Into Your Home",
-      "verify": true
+      "verify": true,
+      "desc": "Live in the Arasaka estate."
     },
     {
       "batch": 19,
       "source": "nexus",
       "id": 36108,
       "name": "Sell Apartments - Real Estate Expansion",
-      "verify": true
+      "verify": true,
+      "desc": "Sell apartments you've bought."
     },
     {
       "batch": 19,
       "source": "nexus",
       "id": 36764,
       "name": "Villa V - North Oak Player Mansion",
-      "verify": true
+      "verify": true,
+      "desc": "A player mansion in North Oak."
     },
     {
       "batch": 20,
       "source": "nexus",
       "id": 36285,
       "name": "Night City Glamdoc Colors",
-      "verify": true
+      "verify": true,
+      "desc": "More colors for the 2.5 Glamdoc cyberware cosmetics."
     },
     {
       "batch": 20,
       "source": "nexus",
       "id": 37005,
       "name": "NetWatch Cyberware and Accessories",
-      "verify": true
+      "verify": true,
+      "desc": "NetWatch-style cyberware cosmetics for both V."
     },
     {
       "batch": 20,
       "source": "nexus",
       "id": 36669,
       "name": "Menu Background Recolor",
-      "verify": true
+      "verify": true,
+      "desc": "Recolors menu backgrounds."
     },
     {
       "batch": 20,
       "source": "nexus",
       "id": 36449,
-      "name": "Smaller Cyberware Slots"
+      "name": "Smaller Cyberware Slots",
+      "desc": "Compact cyberware slot layout in the Ripperdoc screen."
     },
     {
       "batch": 21,
       "source": "nexus",
       "id": 36666,
       "name": "MP5 Silentium",
-      "verify": true
+      "verify": true,
+      "desc": "New suppressed SMG."
     },
     {
       "batch": 21,
       "source": "nexus",
       "id": 36168,
       "name": "Darth Vader's Lightsaber",
-      "verify": true
+      "verify": true,
+      "desc": "A lightsaber melee weapon."
     },
     {
       "batch": 22,
       "source": "nexus",
       "id": 34427,
       "name": "Vehicle Theft and Stock Market Economy Overhaul",
-      "optional": true
+      "optional": true,
+      "desc": "Car theft, a stock market, street cyberpsychos, arrest and prison."
     },
     {
       "batch": 22,
       "source": "nexus",
       "id": 34807,
       "name": "A.R.R 2.5 - Hyper-FPS Movement Overhaul",
-      "optional": true
+      "optional": true,
+      "desc": "Fast, arcade-shooter movement."
     },
     {
       "batch": 22,
@@ -747,7 +843,8 @@
       "id": 35708,
       "name": "Cyberware-AE (Augment Expansion)",
       "optional": true,
-      "note": "Overlaps Cyberware-EX; test together"
+      "note": "Overlaps Cyberware-EX; test together",
+      "desc": "Adds augment cyberware."
     },
     {
       "batch": 22,
@@ -755,7 +852,8 @@
       "id": 35611,
       "name": "NCPD First Response - Play as a Cop",
       "verify": true,
-      "optional": true
+      "optional": true,
+      "desc": "Play as an NCPD officer: patrols, calls and arrests."
     },
     {
       "batch": 22,
@@ -763,7 +861,8 @@
       "id": 35664,
       "name": "Criminal Tendencies",
       "verify": true,
-      "optional": true
+      "optional": true,
+      "desc": "Crime-focused gameplay additions."
     },
     {
       "batch": 23,
@@ -771,7 +870,8 @@
       "id": 36749,
       "name": "Harrow - CCXL Hair",
       "verify": true,
-      "optional": true
+      "optional": true,
+      "desc": "New hairstyle for both body types."
     },
     {
       "batch": 23,
@@ -779,7 +879,8 @@
       "id": 36230,
       "name": "Emery - CCXL Hair",
       "verify": true,
-      "optional": true
+      "optional": true,
+      "desc": "New hairstyle for both body types."
     },
     {
       "batch": 23,
@@ -787,7 +888,8 @@
       "id": 37069,
       "name": "Petra - CCXL Hair",
       "verify": true,
-      "optional": true
+      "optional": true,
+      "desc": "New hairstyle for both body types."
     },
     {
       "batch": 23,
@@ -795,14 +897,16 @@
       "id": 36122,
       "name": "House of Vesna - Akali CCXL Hair",
       "verify": true,
-      "optional": true
+      "optional": true,
+      "desc": "Hairstyle with physics for female V."
     },
     {
       "batch": 23,
       "source": "nexus",
       "id": 6844,
       "name": "True E3 Male V",
-      "optional": true
+      "optional": true,
+      "desc": "Male V's face from the E3 demo."
     },
     {
       "batch": 23,
@@ -810,7 +914,8 @@
       "id": 36740,
       "name": "Talia Inspired Voice Mod (changes V's voice)",
       "verify": true,
-      "optional": true
+      "optional": true,
+      "desc": "Replaces V's voice with one inspired by Talia from Edgerunners."
     },
     {
       "batch": 24,
@@ -818,7 +923,8 @@
       "id": 29182,
       "name": "Kerry Romance for Female V",
       "verify": true,
-      "optional": true
+      "optional": true,
+      "desc": "Lets female V romance Kerry Eurodyne."
     },
     {
       "batch": 24,
@@ -826,7 +932,8 @@
       "id": 11590,
       "name": "Romance Hangouts Enhanced",
       "verify": true,
-      "optional": true
+      "optional": true,
+      "desc": "More things to do with your romanced partner: hangouts, routines and scenes."
     },
     {
       "batch": 24,
@@ -834,7 +941,8 @@
       "id": 4508,
       "name": "Judy Romanced Enhanced",
       "verify": true,
-      "optional": true
+      "optional": true,
+      "desc": "Daily routines and extra interactions for a romanced Judy."
     },
     {
       "batch": 24,
@@ -842,7 +950,8 @@
       "id": 4990,
       "name": "Kerry Romanced Enhanced",
       "verify": true,
-      "optional": true
+      "optional": true,
+      "desc": "Daily routines and extra interactions for a romanced Kerry."
     },
     {
       "batch": 25,
@@ -850,7 +959,8 @@
       "id": 17714,
       "name": "spawn0 - BODY MOD 2.0 (adult)",
       "verify": true,
-      "optional": true
+      "optional": true,
+      "desc": "Adult body replacer. Use only one body mod."
     },
     {
       "batch": 25,
@@ -858,21 +968,24 @@
       "id": 36703,
       "name": "spawn0 BODY MOD 2.0 - 2.5 FPP Fix (adult)",
       "verify": true,
-      "optional": true
+      "optional": true,
+      "desc": "Fixes the spawn0 body mod's first-person view on patch 2.5."
     },
     {
       "batch": 26,
       "source": "nexus",
       "id": 790,
       "name": "Appearance Menu Mod (AMM)",
-      "verify": true
+      "verify": true,
+      "desc": "Photo mode toolkit: spawn NPCs and props, pose characters, decorate apartments."
     },
     {
       "batch": 26,
       "source": "nexus",
       "id": 210,
       "name": "Better Vehicle Handling",
-      "verify": true
+      "verify": true,
+      "desc": "Weightier, more grounded car handling."
     }
   ]
 }
